@@ -1,6 +1,8 @@
 dist/
 node_modules/
 *.log
+.knot/
+.antigravitycli/
 
 # Temporary test output files
 *.txt
