@@ -1,6 +1,6 @@
 {
   "name": "opencode-agy-bridge",
-  "version": "0.2.8",
+  "version": "0.2.9-fork.0",
   "type": "module",
   "main": "./dist/index.js",
   "license": "MIT",

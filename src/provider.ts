@@ -1,16 +1,16 @@
 import type {
-  ProviderV2,
-  LanguageModelV2,
-  LanguageModelV2CallOptions,
-  LanguageModelV2StreamPart,
-  LanguageModelV2CallWarning,
-  EmbeddingModelV2,
-  ImageModelV2,
+  ProviderV3,
+  LanguageModelV3,
+  LanguageModelV3CallOptions,
+  LanguageModelV3StreamPart,
+  SharedV3Warning,
+  EmbeddingModelV3,
+  ImageModelV3,
 } from "@ai-sdk/provider";
 import { runAgy } from "./agy-runner.js";
 import { snapshot, findNewConversation, defaultConversationsDir } from "./conversation-tracker.js";
 import { SessionStore } from "./session-store.js";
-import { flattenPrompt } from "./prompt-mapper.js";
+import { flattenPromptDetailed } from "./prompt-mapper.js";
 import { randomUUID } from "node:crypto";
 
 export interface AgyProviderOptions {
@@ -19,6 +19,18 @@ export interface AgyProviderOptions {
   stateFile?: string;
   extraArgs?: string[];
   timeoutMs?: number;
+  /** Real agy model used when the OpenCode model id is the cosmetic "antigravity". */
+  defaultModel?: string;
+}
+
+/** Cosmetic ids that carry no real agy model name. */
+const COSMETIC_MODEL_IDS = new Set(["antigravity"]);
+
+export function resolveAgyModel(modelId: string, opts: AgyProviderOptions): string {
+  if (COSMETIC_MODEL_IDS.has(modelId)) {
+    return opts.defaultModel ?? "gemini-3.6-flash-low";
+  }
+  return modelId;
 }
 
 const prevOutputs = new Map<string, string>();
@@ -76,14 +88,30 @@ export function extractDelta(
   return fullText;
 }
 
+function toV3Usage(u: { inputTokens: number; outputTokens: number; totalTokens: number } | null) {
+  return {
+    inputTokens: {
+      total: u?.inputTokens,
+      noCache: undefined,
+      cacheRead: undefined,
+      cacheWrite: undefined,
+    },
+    outputTokens: {
+      total: u?.outputTokens,
+      text: u?.outputTokens,
+      reasoning: undefined,
+    },
+  };
+}
+
 function buildLanguageModel(
   modelId: string,
   opts: AgyProviderOptions,
-): LanguageModelV2 {
+): LanguageModelV3 {
   const store = new SessionStore(opts.stateFile);
   const conversationsDir = opts.conversationsDir ?? defaultConversationsDir();
 
-  const doGenerate = async (callOpts: LanguageModelV2CallOptions) => {
+  const doGenerate = async (callOpts: LanguageModelV3CallOptions) => {
     const sessionId =
       (callOpts.headers?.["x-agy-session-id"] as string) ??
       (callOpts.providerOptions?.agy as Record<string, unknown> | undefined)
@@ -95,8 +123,8 @@ function buildLanguageModel(
     const processedMessages = entry?.processedMessages ?? 0;
 
     // On first turn (no conversation yet), acquire a global lock before
-    // spawning agy so we can safely diff *.pb files without races from
-    // another concurrent OpenCode instance.
+    // spawning agy so the .pb fallback diff stays race-free across
+    // concurrent OpenCode instances.
     let releaseBindingLock: (() => Promise<void>) | null = null;
     if (!conversationId) {
       releaseBindingLock = await SessionStore.acquireBindingLock();
@@ -110,21 +138,57 @@ function buildLanguageModel(
         ? callOpts.prompt.slice(processedMessages)
         : callOpts.prompt;
 
-      const prompt = flattenPrompt(newMessages);
+      const flattened = flattenPromptDetailed(newMessages);
+      let prompt = flattened.text;
+
+      const warnings: SharedV3Warning[] = [];
+      if (flattened.skippedFileParts > 0) {
+        warnings.push({
+          type: "unsupported",
+          feature: "file content parts",
+          details: `agy bridge omitted ${flattened.skippedFileParts} image/file part(s) — agy CLI does not accept them`,
+        });
+      }
+      if (flattened.skippedToolParts > 0) {
+        warnings.push({
+          type: "unsupported",
+          feature: "tool calling",
+          details: `agy bridge omitted ${flattened.skippedToolParts} tool part(s) — tool use happens inside agy's own process`,
+        });
+      }
+
+      // Structured-output requests (e.g. session title generation): agy has
+      // no response_format flag, so instruct JSON-only and let the caller parse.
+      const responseFormat = (callOpts as { responseFormat?: { type?: string } }).responseFormat;
+      if (responseFormat?.type === "json") {
+        prompt += "\n\nRespond with valid JSON only. No markdown fences, no extra text.";
+        warnings.push({
+          type: "compatibility",
+          feature: "structured-output",
+          details: "agy CLI has no response_format support; appended a JSON-only instruction instead",
+        });
+      }
 
       const result = await runAgy({
         prompt,
         cwd: process.cwd(),
         conversationId: conversationId ?? undefined,
+        model: resolveAgyModel(modelId, opts),
         binary: opts.binary,
         extraArgs: opts.extraArgs,
         timeoutMs: opts.timeoutMs,
       });
 
-      if (!conversationId && before) {
-        const newId = await findNewConversation(before, conversationsDir);
-        if (newId) {
-          conversationId = newId;
+      // Prefer the authoritative id from --output-format json; fall back to
+      // .pb diffing only when agy did not return one (older builds).
+      if (!conversationId) {
+        if (result.conversationId) {
+          conversationId = result.conversationId;
+        } else if (before) {
+          const newId = await findNewConversation(before, conversationsDir);
+          if (newId) {
+            conversationId = newId;
+          }
         }
       }
 
@@ -136,10 +200,14 @@ function buildLanguageModel(
         prevOutputs.set(sessionId, prevOutput);
       }
 
-      const delta = extractDelta(prevOutput, result.stdout, !!conversationId);
+      // JSON responses are per-turn: the new text IS the delta. Only apply
+      // heuristic delta extraction for raw-stdout fallback (unknown shape).
+      const delta = result.parsedJson
+        ? result.text
+        : extractDelta(prevOutput, result.text, !!conversationId);
 
       if (conversationId) {
-        prevOutputs.set(sessionId, result.stdout);
+        prevOutputs.set(sessionId, result.text);
       } else {
         prevOutputs.delete(sessionId);
       }
@@ -149,17 +217,13 @@ function buildLanguageModel(
         sessionId,
         conversationId,
         conversationId ? callOpts.prompt.length : 0,
-        conversationId ? result.stdout : "",
+        conversationId ? result.text : "",
       );
 
       return {
         content: [{ type: "text" as const, text: delta }],
-        finishReason: "stop" as const,
-        usage: {
-          inputTokens: 0,
-          outputTokens: 0,
-          totalTokens: 0,
-        },
+        finishReason: { unified: "stop" as const, raw: "stop" },
+        usage: toV3Usage(result.usage),
         providerMetadata: {
           agy: {
             sessionId,
@@ -167,11 +231,11 @@ function buildLanguageModel(
           },
         },
         response: {
-          id: randomUUID(),
+          id: result.conversationId ?? randomUUID(),
           timestamp: new Date(),
           modelId,
         },
-        warnings: [] as LanguageModelV2CallWarning[],
+        warnings,
       };
     } finally {
       if (releaseBindingLock) {
@@ -180,7 +244,7 @@ function buildLanguageModel(
     }
   };
 
-  const doStream = async (callOpts: LanguageModelV2CallOptions) => {
+  const doStream = async (callOpts: LanguageModelV3CallOptions) => {
     const generatePromise = doGenerate(callOpts);
 
     let aborted = false;
@@ -189,7 +253,7 @@ function buildLanguageModel(
       aborted = true;
     });
 
-    const stream = new ReadableStream<LanguageModelV2StreamPart>({
+    const stream = new ReadableStream<LanguageModelV3StreamPart>({
       async start(controller) {
         try {
           controller.enqueue({
@@ -233,7 +297,7 @@ function buildLanguageModel(
 
           controller.close();
         } catch (err) {
-          controller.enqueue({ type: "error", error: String(err) });
+          controller.enqueue({ type: "error", error: err });
           controller.close();
         }
       },
@@ -246,7 +310,7 @@ function buildLanguageModel(
   };
 
   return {
-    specificationVersion: "v2",
+    specificationVersion: "v3",
     provider: "agy",
     modelId,
     supportedUrls: {},
@@ -255,9 +319,9 @@ function buildLanguageModel(
   };
 }
 
-function unsupportedEmbeddingModel(modelId: string): EmbeddingModelV2<string> {
+function unsupportedEmbeddingModel(modelId: string): EmbeddingModelV3 {
   return {
-    specificationVersion: "v2",
+    specificationVersion: "v3",
     provider: "agy",
     modelId,
     maxEmbeddingsPerCall: 0,
@@ -268,9 +332,9 @@ function unsupportedEmbeddingModel(modelId: string): EmbeddingModelV2<string> {
   };
 }
 
-function unsupportedImageModel(modelId: string): ImageModelV2 {
+function unsupportedImageModel(modelId: string): ImageModelV3 {
   return {
-    specificationVersion: "v2",
+    specificationVersion: "v3",
     provider: "agy",
     modelId,
     maxImagesPerCall: 0,
@@ -282,24 +346,25 @@ function unsupportedImageModel(modelId: string): ImageModelV2 {
 
 export function createAgyProvider(
   opts?: AgyProviderOptions,
-): ProviderV2 & { (modelId: string): LanguageModelV2; provider: string } {
+): ProviderV3 & { (modelId: string): LanguageModelV3; provider: string } {
   const resolvedOpts = opts ?? {};
 
-  const factory = (modelId: string): LanguageModelV2 => {
+  const factory = (modelId: string): LanguageModelV3 => {
     return buildLanguageModel(modelId, resolvedOpts);
   };
 
   factory.provider = "agy";
-  factory.specificationVersion = "v2" as const;
+  factory.specificationVersion = "v3" as const;
   factory.languageModel = factory;
+  factory.embeddingModel = (modelId: string) => unsupportedEmbeddingModel(modelId);
   factory.textEmbeddingModel = (modelId: string) => unsupportedEmbeddingModel(modelId);
   factory.imageModel = (modelId: string) => unsupportedImageModel(modelId);
 
-  return factory as ProviderV2 & { (modelId: string): LanguageModelV2; provider: string };
+  return factory as ProviderV3 & { (modelId: string): LanguageModelV3; provider: string };
 }
 
 export default function defaultFactory(
   opts?: AgyProviderOptions,
-): ProviderV2 {
-  return createAgyProvider(opts) as ProviderV2;
+): ProviderV3 {
+  return createAgyProvider(opts) as ProviderV3;
 }

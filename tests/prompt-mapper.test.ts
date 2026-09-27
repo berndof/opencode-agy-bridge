@@ -1,8 +1,8 @@
 import { describe, test, expect } from "bun:test";
-import { flattenPrompt } from "../src/prompt-mapper";
+import { flattenPrompt, flattenPromptDetailed } from "../src/prompt-mapper";
 
 describe("flattenPrompt", () => {
-  test("filters out system messages", () => {
+  test("preserves system messages at the top", () => {
     const result = flattenPrompt([
       { role: "system", content: "You are a helpful assistant." },
       {
@@ -10,7 +10,8 @@ describe("flattenPrompt", () => {
         content: [{ type: "text", text: "hi" }],
       },
     ]);
-    expect(result).toBe("hi");
+    expect(result).toContain("System: You are a helpful assistant.");
+    expect(result).toContain("hi");
   });
 
   test("single user message: raw text, no role prefix", () => {
@@ -48,16 +49,16 @@ describe("flattenPrompt", () => {
         content: [{ type: "text", text: "how are you?" }],
       },
     ]);
-    expect(result).toContain("[Contexto previo");
-    expect(result).toContain("[Fin del contexto]");
-    expect(result).toContain("Petición actual:");
+    expect(result).toContain("[Previous conversation context]");
+    expect(result).toContain("[End of context]");
+    expect(result).toContain("Current request:");
     expect(result).toContain("how are you?");
     expect(result).toContain("User: hello");
     expect(result).toContain("Assistant: hi there");
   });
 
-  test("omits file parts with warning", () => {
-    const result = flattenPrompt([
+  test("counts omitted file parts", () => {
+    const result = flattenPromptDetailed([
       {
         role: "user",
         content: [
@@ -66,7 +67,8 @@ describe("flattenPrompt", () => {
         ],
       },
     ]);
-    expect(result).toBe("Look at this:");
+    expect(result.text).toBe("Look at this:");
+    expect(result.skippedFileParts).toBe(1);
   });
 
   test("handles user message with multiple text parts", () => {
@@ -82,16 +84,17 @@ describe("flattenPrompt", () => {
     expect(result).toBe("First part.\nSecond part.");
   });
 
-  test("returns empty string for system-only prompt", () => {
+  test("system-only prompt returns system block, not empty", () => {
     const result = flattenPrompt([
       { role: "system", content: "You are an agent." },
       { role: "system", content: "Use tools carefully." },
     ]);
-    expect(result).toBe("");
+    expect(result).toContain("System:");
+    expect(result).toContain("You are an agent.");
   });
 
-  test("ignores tool-call parts in multi-message context", () => {
-    const result = flattenPrompt([
+  test("counts tool-call parts in multi-message context", () => {
+    const result = flattenPromptDetailed([
       {
         role: "assistant",
         content: [
@@ -108,7 +111,7 @@ describe("flattenPrompt", () => {
         content: [{ type: "text", text: "next" }],
       },
     ]);
-    expect(result).not.toContain("[Tool call: read_file");
-    expect(result).toContain("next");
+    expect(result.text).toContain("next");
+    expect(result.skippedToolParts).toBe(1);
   });
 });

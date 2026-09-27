@@ -1,5 +1,5 @@
 import { createAgyProvider } from "./provider.js";
-import type { ProviderV2 } from "@ai-sdk/provider";
+import type { ProviderV3 } from "@ai-sdk/provider";
 import type { AgyProviderOptions } from "./provider.js";
 
 export { createAgyProvider } from "./provider.js";
@@ -16,5 +16,5 @@ export default function unified(input?: any): any {
     };
   }
 
-  return createAgyProvider(input as AgyProviderOptions) as ProviderV2;
+  return createAgyProvider(input as AgyProviderOptions) as ProviderV3;
 }
