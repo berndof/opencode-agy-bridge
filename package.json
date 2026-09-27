@@ -33,8 +33,12 @@
     "@types/bun": "latest",
     "typescript": "^5.8.0"
   },
-  "dependencies": {
-    "@ai-sdk/openai": "^3.0.67",
-    "zod": "^3.25.0-beta.20250519T094321"
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/berndof/opencode-agy-bridge.git"
+  },
+  "homepage": "https://github.com/berndof/opencode-agy-bridge#readme",
+  "bugs": {
+    "url": "https://github.com/berndof/opencode-agy-bridge/issues"
   }
 }

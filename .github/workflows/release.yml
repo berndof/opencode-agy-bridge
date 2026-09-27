@@ -1,3 +1,7 @@
+# Fork note: npm publishing is intentionally DISABLED in this fork.
+# The package name is owned by the upstream project (raultov/opencode-agy-bridge),
+# and this fork is consumed via a local path (see README "Build from source").
+# Tags only trigger a build + test validation pass.
 name: Release
 
 on:
@@ -6,15 +10,10 @@ on:
       - 'v*'
 
 jobs:
-  publish:
+  validate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          registry-url: https://registry.npmjs.org/
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -23,6 +22,3 @@ jobs:
       - run: bun install
       - run: bun run build
       - run: bun test
-      - run: npm publish --no-git-checks
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

@@ -2,6 +2,12 @@
 
 OpenCode plugin + provider that routes LLM prompts to `agy` (Google Antigravity CLI).
 
+> **Fork of [`raultov/opencode-agy-bridge`](https://github.com/raultov/opencode-agy-bridge)** (MIT).
+> This fork (`0.2.9-fork.0`) adds LanguageModelV3 support, `--model` routing, JSON output parsing,
+> real usage metrics and English prompt framing. It is **not published to npm** — install it from
+> this repository (see [Build from source](#build-from-source) + [Local development](#local-development-absolute-paths)).
+> The upstream `0.2.8` package remains available as a rollback option.
+
 ## How it works
 
 ```
@@ -33,24 +39,26 @@ This fork introduces key architectural upgrades and enhancements:
 
 ## Installation
 
-### Automatic (hands-free)
+> **This fork is consumed from a local path**, not from npm (see fork note above). The npm-based
+> options below (`opencode-agy-bridge@<version>`) refer to the **upstream** package and are kept
+> for reference/rollback only. CI publishing is disabled in this fork (`release.yml` validates
+> builds on tags without calling `npm publish`).
 
-Add the package with its version to `~/.config/opencode/opencode.json`. OpenCode will download and resolve it from npm automatically — no terminal commands needed.
-
-### Manual global install
-
-```bash
-npm install -g opencode-agy-bridge
-# or: bun install -g opencode-agy-bridge
-# or: pnpm add -g opencode-agy-bridge
-```
-
-### Build from source
+### Build from source (recommended for this fork)
 
 ```bash
 git clone https://github.com/berndof/opencode-agy-bridge.git
 cd opencode-agy-bridge
 bun install && bun run build && bun test
+```
+
+Then wire the local paths in `~/.config/opencode/opencode.json` — see
+[Local development](#local-development-absolute-paths).
+
+### Upstream (npm, reference only)
+
+```bash
+npm install -g opencode-agy-bridge   # upstream package, version 0.2.8
 ```
 
 ## Configuration
@@ -59,7 +67,7 @@ Add the plugin and provider to `~/.config/opencode/opencode.json`.
 
 > The **node.js** path represents a **package** (directory or npm package name), not a `.js` file. Pointing `"npm"` at a `.js` file will cause a `ProviderInitError` because opencode internally appends `/provider` to resolve the exports map.
 
-### Recommended: configuration with model routing
+### Upstream npm variant (reference/rollback)
 
 ```jsonc
 {
@@ -87,6 +95,9 @@ Add the plugin and provider to `~/.config/opencode/opencode.json`.
 ```
 
 ### Local development (absolute paths)
+
+> This is the **recommended setup for this fork**: `plugin` points at the built entry file and
+> `provider.npm` at the package directory (opencode resolves `/provider` from its exports map).
 
 ```jsonc
 {
