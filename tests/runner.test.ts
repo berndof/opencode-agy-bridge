@@ -4,8 +4,15 @@ import { writeFile, chmod, mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
+const JSON_REPLY = JSON.stringify({
+  conversation_id: "conv-abc",
+  status: "SUCCESS",
+  response: "Hello from mock agy",
+  usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
+});
+
 describe("agy-runner", () => {
-  test("spawns a mock binary and captures stdout via stdin", async () => {
+  test("passes prompt as -p argv with --output-format json (no stdin)", async () => {
     const tmp = await mkdtemp(join(tmpdir(), "agy-bridge-test-"));
     const mockBinary = join(tmp, "mock-agy");
 
@@ -13,9 +20,9 @@ describe("agy-runner", () => {
       mockBinary,
       `#!/usr/bin/env bash
 echo "$@"
-echo "---stdin-read---"
+echo "---stdin-eof---"
 cat -
-echo "Hello from mock agy"
+echo '${JSON_REPLY}'
 exit 0
 `,
     );
@@ -30,16 +37,19 @@ exit 0
       });
 
       expect(result.exitCode).toBe(0);
-      expect(result.stdout).toContain("Hello from mock agy");
-      expect(result.stdout).toContain("--add-dir");
-      expect(result.stdout).toContain("-p");
+      // prompt travels as argv, not stdin
       expect(result.stdout).toContain("test prompt");
+      expect(result.stdout).toContain("--output-format");
+      expect(result.stdout).toContain("json");
+      expect(result.text).toBe("Hello from mock agy");
+      expect(result.conversationId).toBe("conv-abc");
+      expect(result.usage).toEqual({ inputTokens: 10, outputTokens: 5, totalTokens: 15 });
     } finally {
       await rm(tmp, { recursive: true, force: true });
     }
   });
 
-  test("passes conversation id when provided", async () => {
+  test("passes --model and --conversation when provided", async () => {
     const tmp = await mkdtemp(join(tmpdir(), "agy-bridge-test-"));
     const mockBinary = join(tmp, "mock-agy");
 
@@ -47,7 +57,7 @@ exit 0
       mockBinary,
       `#!/usr/bin/env bash
 echo "$@"
-cat -
+echo '${JSON_REPLY}'
 exit 0
 `,
     );
@@ -58,13 +68,44 @@ exit 0
         binary: mockBinary,
         prompt: "hello",
         cwd: tmp,
+        model: "gemini-3.6-flash-low",
         conversationId: "conv-123",
         timeoutMs: 5000,
       });
 
+      expect(result.stdout).toContain("--model");
+      expect(result.stdout).toContain("gemini-3.6-flash-low");
       expect(result.stdout).toContain("--conversation");
       expect(result.stdout).toContain("conv-123");
-      expect(result.stdout).toContain("hello");
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("falls back to raw stdout when output is not JSON", async () => {
+    const tmp = await mkdtemp(join(tmpdir(), "agy-bridge-test-"));
+    const mockBinary = join(tmp, "mock-agy");
+
+    await writeFile(
+      mockBinary,
+      `#!/usr/bin/env bash
+echo "plain text reply"
+exit 0
+`,
+    );
+    await chmod(mockBinary, 0o755);
+
+    try {
+      const result = await runAgy({
+        binary: mockBinary,
+        prompt: "hi",
+        cwd: tmp,
+        timeoutMs: 5000,
+      });
+
+      expect(result.text).toContain("plain text reply");
+      expect(result.conversationId).toBeNull();
+      expect(result.usage).toBeNull();
     } finally {
       await rm(tmp, { recursive: true, force: true });
     }
@@ -105,7 +146,7 @@ exit 1
       mockBinary,
       `#!/usr/bin/env bash
 echo "$@"
-cat -
+echo '${JSON_REPLY}'
 exit 0
 `,
     );
@@ -116,11 +157,11 @@ exit 0
         binary: mockBinary,
         prompt: "hi",
         cwd: tmp,
-        extraArgs: ["--dangerously-skip-permissions"],
+        extraArgs: ["--effort", "low"],
         timeoutMs: 5000,
       });
 
-      expect(result.stdout).toContain("--dangerously-skip-permissions");
+      expect(result.stdout).toContain("--effort");
     } finally {
       await rm(tmp, { recursive: true, force: true });
     }
