@@ -14,9 +14,10 @@ OpenCode plugin + provider that routes LLM prompts to `agy` (Google Antigravity 
 opencode TUI
   └─ /model → select agy/gemini-3.6-flash-low (or agy/antigravity)
       └─ you type a prompt
-          └─ provider spawns: agy --add-dir <cwd> [--conversation <id>] [--model <modelId>] --output-format json -p <prompt>
+          └─ provider spawns: agy --add-dir <cwd> [--conversation <id>] [--model <modelId>] --input-format stream-json --output-format stream-json
+              └─ prompt travels on stdin as NDJSON: {"event":"user","message":{...}}
               └─ agy → Google Antigravity backend → Gemini
-                  └─ stdout (JSON formatted response + token usage metrics)
+                  └─ stdout (NDJSON events; final {"event":"result"} carries response + token usage)
               └─ provider parses JSON payload / extracts delta vs previous turn
           └─ stream-start → text-start → text-delta → text-end → finish (with usage) → opencode renders
 ```
@@ -27,9 +28,9 @@ This fork introduces key architectural upgrades and enhancements:
 
 - **Migration to LanguageModelV3 / ProviderV3:** Fully updated to the `@ai-sdk/provider` V3 specification (`LanguageModelV3`, `ProviderV3`) for first-class compatibility with modern OpenCode and Vercel AI SDK v3.
 - **Model Routing (`--model` support):** Explicit model IDs configured in OpenCode (such as `gemini-3.6-flash-low`, `gemini-3.6-flash-medium`, `gemini-3.6-flash-high`) are passed directly via `--model` to the `agy` CLI. Cosmetic aliases like `antigravity` seamlessly fall back to `defaultModel` (default: `gemini-3.6-flash-low`).
-- **Native JSON Output & Usage Metrics:** Runs `agy` with `--output-format json` and `-p <prompt>` to receive structured responses, extracting authoritative conversation IDs and token usage metrics (`inputTokens`, `outputTokens`, `totalTokens`). Falls back gracefully to raw stdout for unparsed responses.
+- **Structured Output & Usage Metrics:** Runs `agy` in stream-json mode (`--input-format stream-json --output-format stream-json`), reading the authoritative `result` event for conversation IDs and token usage metrics (`inputTokens`, `outputTokens`, `totalTokens`). Falls back gracefully to raw stdout for unparsed responses.
 - **Preserved System Instructions & Technical English Context:** Preserves system prompt messages at the top of context blocks and standardizes multi-turn prompt framing using clean English delimiters (`[Previous conversation context]`, `[End of context]`, `Current request:`).
-- **Posix Argv Prompt Delivery:** Passes prompt directly via CLI arguments avoiding standard input hanging issues.
+- **Stdin NDJSON Prompt Delivery:** Passes the prompt over stdin instead of argv. Linux caps a single argument at 128 KiB (`MAX_ARG_STRLEN`) and raises `E2BIG` beyond that, which long agent sessions hit routinely; stdin has no such limit.
 
 ## Prerequisites
 
@@ -167,7 +168,7 @@ A future v2 could bypass `agy` CLI entirely and speak directly to a language_ser
 
 ```
 src/
-├── agy-runner.ts           # spawn agy with --output-format json and -p argv
+├── agy-runner.ts           # spawn agy in stream-json mode, prompt via stdin NDJSON
 ├── conversation-tracker.ts # snapshot .pb files, infer conversation_id fallback
 ├── session-store.ts        # persist session→conversation_id mapping
 ├── prompt-mapper.ts        # Vercel AI SDK prompt → formatted plain text
