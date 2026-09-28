@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { StringDecoder } from "node:string_decoder";
 
 export interface RunAgyInput {
   prompt: string;
@@ -8,6 +9,8 @@ export interface RunAgyInput {
   binary?: string;
   extraArgs?: string[];
   timeoutMs?: number;
+  onTextDelta?: (delta: string) => void;
+  abortSignal?: AbortSignal;
 }
 
 export interface AgyUsage {
@@ -135,6 +138,11 @@ export async function runAgy(input: RunAgyInput): Promise<RunAgyResult> {
   });
 
   return new Promise((resolve, reject) => {
+    if (input.abortSignal?.aborted) {
+      reject(new Error("agy execution aborted"));
+      return;
+    }
+
     const child = spawn(binary, args, {
       cwd: input.cwd,
       stdio: ["pipe", "pipe", "pipe"],
@@ -142,12 +150,69 @@ export async function runAgy(input: RunAgyInput): Promise<RunAgyResult> {
 
     const stdoutChunks: Buffer[] = [];
     const stderrChunks: Buffer[] = [];
+    const decoder = new StringDecoder("utf-8");
+    let stdoutBuffer = "";
+    let isSettled = false;
 
-    child.stdout.on("data", (chunk: Buffer) => stdoutChunks.push(chunk));
+    function processStreamLine(line: string) {
+      if (!line.startsWith("{")) return;
+      try {
+        const parsed = JSON.parse(line) as {
+          event?: string;
+          step_update?: {
+            step_type?: string;
+            text_delta?: string;
+          };
+        };
+        if (
+          parsed.event === "step_update" &&
+          (parsed.step_update?.step_type === "agent_response" || !parsed.step_update?.step_type) &&
+          typeof parsed.step_update?.text_delta === "string" &&
+          parsed.step_update.text_delta.length > 0
+        ) {
+          input.onTextDelta?.(parsed.step_update.text_delta);
+        }
+      } catch {
+        // Line might be incomplete or non-JSON; full tolerant parsing occurs on close.
+      }
+    }
+
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdoutChunks.push(chunk);
+      if (input.onTextDelta) {
+        stdoutBuffer += decoder.write(chunk);
+        let newlineIdx: number;
+        while ((newlineIdx = stdoutBuffer.indexOf("\n")) !== -1) {
+          const line = stdoutBuffer.slice(0, newlineIdx).trim();
+          stdoutBuffer = stdoutBuffer.slice(newlineIdx + 1);
+          if (line) {
+            processStreamLine(line);
+          }
+        }
+      }
+    });
+
     child.stderr.on("data", (chunk: Buffer) => stderrChunks.push(chunk));
 
+    let cleanupAbort: (() => void) | null = null;
+    if (input.abortSignal) {
+      const onAbort = () => {
+        if (isSettled) return;
+        isSettled = true;
+        clearTimeout(timer);
+        child.kill("SIGKILL");
+        reject(new Error("agy execution aborted"));
+      };
+      input.abortSignal.addEventListener("abort", onAbort, { once: true });
+      cleanupAbort = () => {
+        input.abortSignal?.removeEventListener("abort", onAbort);
+      };
+    }
+
     const timer = setTimeout(() => {
-      child.kill("SIGTERM");
+      if (isSettled) return;
+      isSettled = true;
+      child.kill("SIGKILL");
       reject(new Error("agy timed out"));
     }, timeoutMs);
 
@@ -158,6 +223,16 @@ export async function runAgy(input: RunAgyInput): Promise<RunAgyResult> {
 
     child.on("close", (code) => {
       clearTimeout(timer);
+      if (cleanupAbort) cleanupAbort();
+      if (isSettled) return;
+      isSettled = true;
+
+      if (input.onTextDelta) {
+        stdoutBuffer += decoder.end();
+        if (stdoutBuffer.trim()) {
+          processStreamLine(stdoutBuffer.trim());
+        }
+      }
 
       const stdout = Buffer.concat(stdoutChunks).toString("utf-8");
       const stderr = Buffer.concat(stderrChunks).toString("utf-8");
@@ -189,6 +264,10 @@ export async function runAgy(input: RunAgyInput): Promise<RunAgyResult> {
 
     child.on("error", (err) => {
       clearTimeout(timer);
+      if (cleanupAbort) cleanupAbort();
+      if (isSettled) return;
+      isSettled = true;
+
       const errno = err as NodeJS.ErrnoException;
       if (errno.code === "E2BIG") {
         reject(
