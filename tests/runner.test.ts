@@ -169,4 +169,51 @@ exit 1
       expect(result.stdout).toContain("low");
     });
   });
+
+  test("streams text deltas via onTextDelta in real time", async () => {
+    const bin = `#!/usr/bin/env bash
+cat - > /dev/null
+echo '${JSON.stringify({ event: "step_update", step_update: { step_type: "agent_response", text_delta: "Hello ", state: "ACTIVE" } })}'
+echo '${JSON.stringify({ event: "step_update", step_update: { step_type: "tool", tool_name: "run_command" } })}'
+echo '${JSON.stringify({ event: "step_update", step_update: { step_type: "agent_response", text_delta: "world!", state: "DONE" } })}'
+echo '${JSON.stringify({ event: "result", result: { conversation_id: "c1", status: "SUCCESS", response: "Hello world!" } })}'
+exit 0
+`;
+    await withMock(bin, async (dir, b) => {
+      const deltas: string[] = [];
+      const result = await runAgy({
+        binary: b,
+        prompt: "hi",
+        cwd: dir,
+        timeoutMs: 5000,
+        onTextDelta: (d) => deltas.push(d),
+      });
+
+      expect(deltas).toEqual(["Hello ", "world!"]);
+      expect(result.text).toBe("Hello world!");
+      expect(result.conversationId).toBe("c1");
+    });
+  });
+
+  test("aborts execution when abortSignal is triggered", async () => {
+    const bin = `#!/usr/bin/env bash
+sleep 10
+exit 0
+`;
+    await withMock(bin, async (dir, b) => {
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(), 50);
+
+      await expect(
+        runAgy({
+          binary: b,
+          prompt: "hi",
+          cwd: dir,
+          timeoutMs: 5000,
+          abortSignal: controller.signal,
+        }),
+      ).rejects.toThrow();
+    });
+  });
 });
+

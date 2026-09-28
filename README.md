@@ -30,6 +30,7 @@ This fork introduces key architectural upgrades and enhancements:
 - **Model Routing (`--model` support):** Explicit model IDs configured in OpenCode (such as `gemini-3.6-flash-low`, `gemini-3.6-flash-medium`, `gemini-3.6-flash-high`) are passed directly via `--model` to the `agy` CLI. Cosmetic aliases like `antigravity` seamlessly fall back to `defaultModel` (default: `gemini-3.6-flash-low`).
 - **Structured Output & Usage Metrics:** Runs `agy` in stream-json mode (`--input-format stream-json --output-format stream-json`), reading the authoritative `result` event for conversation IDs and token usage metrics (`inputTokens`, `outputTokens`, `totalTokens`). Falls back gracefully to raw stdout for unparsed responses.
 - **Preserved System Instructions & Technical English Context:** Preserves system prompt messages at the top of context blocks and standardizes multi-turn prompt framing using clean English delimiters (`[Previous conversation context]`, `[End of context]`, `Current request:`).
+- **Real-Time Token Streaming:** Streams `step_update` (`agent_response`) text deltas from `agy` directly into the OpenCode UI as tokens are emitted, providing immediate visual feedback (low TTFT) instead of waiting for full response completion.
 - **Stdin NDJSON Prompt Delivery:** Passes the prompt over stdin instead of argv. Linux caps a single argument at 128 KiB (`MAX_ARG_STRLEN`) and raises `E2BIG` beyond that, which long agent sessions hit routinely; stdin has no such limit.
 
 ## Prerequisites

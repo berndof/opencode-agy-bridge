@@ -104,6 +104,16 @@ function toV3Usage(u: { inputTokens: number; outputTokens: number; totalTokens: 
   };
 }
 
+interface PreparedAgyCall {
+  sessionId: string;
+  conversationId: string | null;
+  before: Set<string> | null;
+  prompt: string;
+  warnings: SharedV3Warning[];
+  entry: Awaited<ReturnType<SessionStore["getEntry"]>>;
+  releaseBindingLock: (() => Promise<void>) | null;
+}
+
 function buildLanguageModel(
   modelId: string,
   opts: AgyProviderOptions,
@@ -111,7 +121,7 @@ function buildLanguageModel(
   const store = new SessionStore(opts.stateFile);
   const conversationsDir = opts.conversationsDir ?? defaultConversationsDir();
 
-  const doGenerate = async (callOpts: LanguageModelV3CallOptions) => {
+  const prepareAgyCall = async (callOpts: LanguageModelV3CallOptions): Promise<PreparedAgyCall> => {
     const sessionId =
       (callOpts.headers?.["x-agy-session-id"] as string) ??
       (callOpts.providerOptions?.agy as Record<string, unknown> | undefined)
@@ -130,9 +140,8 @@ function buildLanguageModel(
       releaseBindingLock = await SessionStore.acquireBindingLock();
     }
 
-    let before: Set<string> | null = null;
     try {
-      before = conversationId ? null : await snapshot(conversationsDir);
+      const before = conversationId ? null : await snapshot(conversationsDir);
 
       const newMessages = conversationId
         ? callOpts.prompt.slice(processedMessages)
@@ -169,56 +178,86 @@ function buildLanguageModel(
         });
       }
 
-      const result = await runAgy({
+      return {
+        sessionId,
+        conversationId,
+        before,
         prompt,
+        warnings,
+        entry,
+        releaseBindingLock,
+      };
+    } catch (err) {
+      if (releaseBindingLock) {
+        await releaseBindingLock();
+      }
+      throw err;
+    }
+  };
+
+  const finalizeAgyCall = async (
+    prep: PreparedAgyCall,
+    result: Awaited<ReturnType<typeof runAgy>>,
+    promptLength: number,
+  ): Promise<{ conversationId: string | null; delta: string }> => {
+    let conversationId = prep.conversationId;
+    if (!conversationId) {
+      if (result.conversationId) {
+        conversationId = result.conversationId;
+      } else if (prep.before) {
+        const newId = await findNewConversation(prep.before, conversationsDir);
+        if (newId) {
+          conversationId = newId;
+        }
+      }
+    }
+
+    // Restore prevOutput from persisted store (survives restarts).
+    // In-memory cache takes priority (faster, has latest turn data).
+    let prevOutput = prevOutputs.get(prep.sessionId) ?? "";
+    if (!prevOutput && prep.entry?.prevOutput) {
+      prevOutput = prep.entry.prevOutput;
+      prevOutputs.set(prep.sessionId, prevOutput);
+    }
+
+    // JSON responses are per-turn: the new text IS the delta. Only apply
+    // heuristic delta extraction for raw-stdout fallback (unknown shape).
+    const delta = result.parsedJson
+      ? result.text
+      : extractDelta(prevOutput, result.text, !!conversationId);
+
+    if (conversationId) {
+      prevOutputs.set(prep.sessionId, result.text);
+    } else {
+      prevOutputs.delete(prep.sessionId);
+    }
+
+    // Persist state so it survives process restarts.
+    await store.set(
+      prep.sessionId,
+      conversationId,
+      conversationId ? promptLength : 0,
+      conversationId ? result.text : "",
+    );
+
+    return { conversationId, delta };
+  };
+
+  const doGenerate = async (callOpts: LanguageModelV3CallOptions) => {
+    const prep = await prepareAgyCall(callOpts);
+    try {
+      const result = await runAgy({
+        prompt: prep.prompt,
         cwd: process.cwd(),
-        conversationId: conversationId ?? undefined,
+        conversationId: prep.conversationId ?? undefined,
         model: resolveAgyModel(modelId, opts),
         binary: opts.binary,
         extraArgs: opts.extraArgs,
         timeoutMs: opts.timeoutMs,
+        abortSignal: callOpts.abortSignal,
       });
 
-      // Prefer the authoritative id from --output-format json; fall back to
-      // .pb diffing only when agy did not return one (older builds).
-      if (!conversationId) {
-        if (result.conversationId) {
-          conversationId = result.conversationId;
-        } else if (before) {
-          const newId = await findNewConversation(before, conversationsDir);
-          if (newId) {
-            conversationId = newId;
-          }
-        }
-      }
-
-      // Restore prevOutput from persisted store (survives restarts).
-      // In-memory cache takes priority (faster, has latest turn data).
-      let prevOutput = prevOutputs.get(sessionId) ?? "";
-      if (!prevOutput && entry?.prevOutput) {
-        prevOutput = entry.prevOutput;
-        prevOutputs.set(sessionId, prevOutput);
-      }
-
-      // JSON responses are per-turn: the new text IS the delta. Only apply
-      // heuristic delta extraction for raw-stdout fallback (unknown shape).
-      const delta = result.parsedJson
-        ? result.text
-        : extractDelta(prevOutput, result.text, !!conversationId);
-
-      if (conversationId) {
-        prevOutputs.set(sessionId, result.text);
-      } else {
-        prevOutputs.delete(sessionId);
-      }
-
-      // Persist state so it survives process restarts.
-      await store.set(
-        sessionId,
-        conversationId,
-        conversationId ? callOpts.prompt.length : 0,
-        conversationId ? result.text : "",
-      );
+      const { conversationId, delta } = await finalizeAgyCall(prep, result, callOpts.prompt.length);
 
       return {
         content: [{ type: "text" as const, text: delta }],
@@ -226,7 +265,7 @@ function buildLanguageModel(
         usage: toV3Usage(result.usage),
         providerMetadata: {
           agy: {
-            sessionId,
+            sessionId: prep.sessionId,
             conversationId: conversationId ?? null,
           },
         },
@@ -235,74 +274,125 @@ function buildLanguageModel(
           timestamp: new Date(),
           modelId,
         },
-        warnings,
+        warnings: prep.warnings,
       };
     } finally {
-      if (releaseBindingLock) {
-        await releaseBindingLock();
+      if (prep.releaseBindingLock) {
+        await prep.releaseBindingLock();
       }
     }
   };
 
   const doStream = async (callOpts: LanguageModelV3CallOptions) => {
-    const generatePromise = doGenerate(callOpts);
-
-    let aborted = false;
-
-    callOpts.abortSignal?.addEventListener("abort", () => {
-      aborted = true;
-    });
+    const textId = "agy-1";
 
     const stream = new ReadableStream<LanguageModelV3StreamPart>({
       async start(controller) {
+        let prep: PreparedAgyCall | null = null;
         try {
+          prep = await prepareAgyCall(callOpts);
+
           controller.enqueue({
             type: "stream-start",
-            warnings: [],
+            warnings: prep.warnings,
           });
 
-          const result = await generatePromise;
+          let textStarted = false;
+          let streamedText = "";
 
-          if (aborted) {
+          const result = await runAgy({
+            prompt: prep.prompt,
+            cwd: process.cwd(),
+            conversationId: prep.conversationId ?? undefined,
+            model: resolveAgyModel(modelId, opts),
+            binary: opts.binary,
+            extraArgs: opts.extraArgs,
+            timeoutMs: opts.timeoutMs,
+            abortSignal: callOpts.abortSignal,
+            onTextDelta: (delta: string) => {
+              if (callOpts.abortSignal?.aborted) return;
+              if (!textStarted) {
+                textStarted = true;
+                controller.enqueue({
+                  type: "text-start",
+                  id: textId,
+                });
+              }
+              streamedText += delta;
+              controller.enqueue({
+                type: "text-delta",
+                id: textId,
+                delta,
+              });
+            },
+          });
+
+          if (callOpts.abortSignal?.aborted) {
             controller.close();
             return;
           }
 
-          const textContent = result.content.find(
-            (c) => c.type === "text",
-          );
-          const text = textContent && "text" in textContent ? textContent.text : "";
+          const { conversationId, delta } = await finalizeAgyCall(prep, result, callOpts.prompt.length);
 
-          if (text) {
+          controller.enqueue({
+            type: "response-metadata",
+            id: result.conversationId ?? randomUUID(),
+            timestamp: new Date(),
+            modelId,
+          });
+
+          if (textStarted) {
+            // If the final parsed delta has additional characters not captured by stream
+            if (delta.length > streamedText.length && delta.startsWith(streamedText)) {
+              const remaining = delta.slice(streamedText.length);
+              if (remaining) {
+                controller.enqueue({
+                  type: "text-delta",
+                  id: textId,
+                  delta: remaining,
+                });
+              }
+            }
+            controller.enqueue({
+              type: "text-end",
+              id: textId,
+            });
+          } else if (delta) {
+            // Fallback: agy did not emit streaming deltas (e.g. mock or plain text), emit full text
             controller.enqueue({
               type: "text-start",
-              id: "agy-1",
+              id: textId,
             });
             controller.enqueue({
               type: "text-delta",
-              id: "agy-1",
-              delta: text,
+              id: textId,
+              delta,
             });
             controller.enqueue({
               type: "text-end",
-              id: "agy-1",
+              id: textId,
             });
           }
 
           controller.enqueue({
             type: "finish",
-            finishReason: result.finishReason,
-            usage: result.usage,
+            finishReason: { unified: "stop" as const, raw: "stop" },
+            usage: toV3Usage(result.usage),
           });
 
           controller.close();
         } catch (err) {
+          if (callOpts.abortSignal?.aborted) {
+            controller.close();
+            return;
+          }
           controller.enqueue({ type: "error", error: err });
           controller.close();
+        } finally {
+          if (prep?.releaseBindingLock) {
+            await prep.releaseBindingLock();
+          }
         }
-      },
-      cancel() {
-        // agy is one-shot; no real cancellation possible here
       },
     });
 
