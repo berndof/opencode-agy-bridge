@@ -1,4 +1,3 @@
-import type { SpawnOptions } from "node:child_process";
 import { spawn } from "node:child_process";
 
 export interface RunAgyInput {
@@ -21,9 +20,9 @@ export interface RunAgyResult {
   stdout: string;
   stderr: string;
   exitCode: number;
-  /** Parsed response text when --output-format json succeeds, else raw stdout. */
+  /** Parsed response text when stream-json output succeeds, else raw stdout. */
   text: string;
-  /** True when text comes from per-turn JSON response (no delta extraction needed). */
+  /** True when text comes from per-turn JSON result (no delta extraction needed). */
   parsedJson: boolean;
   /** Authoritative conversation id from JSON output, or null when unavailable. */
   conversationId: string | null;
@@ -34,6 +33,7 @@ interface AgyJsonOutput {
   conversation_id?: string;
   status?: string;
   response?: string;
+  error?: string;
   usage?: {
     input_tokens?: number;
     output_tokens?: number;
@@ -41,11 +41,53 @@ interface AgyJsonOutput {
   };
 }
 
-function parseAgyJson(stdout: string): { text: string; conversationId: string | null; usage: AgyUsage | null } | null {
-  // Real agy prints pure JSON, but be tolerant: scan lines from the end for
-  // the last JSON object (mocks/wrappers may echo argv first).
-  const candidates: string[] = [stdout.trim()];
+function toResult(parsed: AgyJsonOutput): {
+  text: string;
+  conversationId: string | null;
+  usage: AgyUsage | null;
+} {
+  return {
+    text: parsed.response ?? "",
+    conversationId: typeof parsed.conversation_id === "string" ? parsed.conversation_id : null,
+    usage: parsed.usage
+      ? {
+        inputTokens: parsed.usage.input_tokens ?? 0,
+        outputTokens: parsed.usage.output_tokens ?? 0,
+        totalTokens: parsed.usage.total_tokens ?? 0,
+      }
+      : null,
+  };
+}
+
+/**
+ * agy emits line-delimited NDJSON in stream-json mode: an init banner (tool
+ * list), `step_update` events with text deltas, and a final
+ * `{"event":"result","result":{...}}` carrying the same fields as
+ * `--output-format json`. Be tolerant: prefer the result event, then fall
+ * back to any standalone JSON object with a string `response`.
+ */
+function parseAgyStdout(stdout: string): (ReturnType<typeof toResult> & { error: string | null }) | null {
   const lines = stdout.split("\n");
+
+  // 1) Authoritative: the stream-json result event.
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim();
+    if (!line.startsWith("{")) continue;
+    try {
+      const parsed = JSON.parse(line) as { event?: string; result?: AgyJsonOutput };
+      if (parsed.event !== "result" || !parsed.result) continue;
+      if (typeof parsed.result.response !== "string") continue;
+      return {
+        ...toResult(parsed.result),
+        error: typeof parsed.result.error === "string" ? parsed.result.error : null,
+      };
+    } catch {
+      continue;
+    }
+  }
+
+  // 2) Fallback: whole stdout as one JSON object, then per-line objects.
+  const candidates: string[] = [stdout.trim()];
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i].trim();
     if (line.startsWith("{") && line.endsWith("}")) candidates.push(line);
@@ -55,17 +97,7 @@ function parseAgyJson(stdout: string): { text: string; conversationId: string | 
     try {
       const parsed = JSON.parse(candidate) as AgyJsonOutput;
       if (typeof parsed.response !== "string") continue;
-      return {
-        text: parsed.response,
-        conversationId: typeof parsed.conversation_id === "string" ? parsed.conversation_id : null,
-        usage: parsed.usage
-          ? {
-            inputTokens: parsed.usage.input_tokens ?? 0,
-            outputTokens: parsed.usage.output_tokens ?? 0,
-            totalTokens: parsed.usage.total_tokens ?? 0,
-          }
-          : null,
-      };
+      return { ...toResult(parsed), error: typeof parsed.error === "string" ? parsed.error : null };
     } catch {
       continue;
     }
@@ -78,6 +110,9 @@ export async function runAgy(input: RunAgyInput): Promise<RunAgyResult> {
   const timeoutMs = input.timeoutMs ?? 300_000;
   const extraArgs = input.extraArgs ?? [];
 
+  // The prompt travels over stdin as an NDJSON stream-json message instead of
+  // argv: Linux caps a single argument at 128 KiB (MAX_ARG_STRLEN) and raises
+  // E2BIG for larger prompts, which long sessions hit routinely.
   const args: string[] = [
     "--add-dir",
     input.cwd,
@@ -88,21 +123,21 @@ export async function runAgy(input: RunAgyInput): Promise<RunAgyResult> {
     args.push("--model", input.model);
   }
 
-  // NOTE: `-p -` does NOT read stdin on current agy builds — the literal
-  // "-" is treated as the prompt. Pass the prompt as argv instead (spawn
-  // uses argv directly, no shell, so no quoting risk).
-  args.push("--output-format", "json");
+  args.push("--input-format", "stream-json", "--output-format", "stream-json");
 
   if (input.conversationId) {
     args.push("--conversation", input.conversationId);
   }
 
-  args.push("-p", input.prompt);
+  const stdinMessage = JSON.stringify({
+    event: "user",
+    message: { role: "user", content: [{ type: "text", text: input.prompt }] },
+  });
 
   return new Promise((resolve, reject) => {
     const child = spawn(binary, args, {
       cwd: input.cwd,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: ["pipe", "pipe", "pipe"],
     });
 
     const stdoutChunks: Buffer[] = [];
@@ -116,6 +151,11 @@ export async function runAgy(input: RunAgyInput): Promise<RunAgyResult> {
       reject(new Error("agy timed out"));
     }, timeoutMs);
 
+    // agy can exit before reading stdin (bad flags, immediate crash); don't
+    // let the write reject the promise twice.
+    child.stdin.on("error", () => { /* surfaced via close/exitCode below */ });
+    child.stdin.end(stdinMessage + "\n");
+
     child.on("close", (code) => {
       clearTimeout(timer);
 
@@ -123,16 +163,19 @@ export async function runAgy(input: RunAgyInput): Promise<RunAgyResult> {
       const stderr = Buffer.concat(stderrChunks).toString("utf-8");
       const exitCode = code ?? 1;
 
-      if (stderr.trim()) {
-      }
-
       if (exitCode !== 0 && !stdout.trim()) {
         const msg = stderr.trim() || `agy exited with status ${exitCode}`;
         reject(new Error(msg));
         return;
       }
 
-      const parsed = parseAgyJson(stdout);
+      const parsed = parseAgyStdout(stdout);
+
+      if (parsed && parsed.error && !parsed.text.trim()) {
+        reject(new Error(parsed.error || stderr.trim() || `agy exited with status ${exitCode}`));
+        return;
+      }
+
       resolve({
         stdout,
         stderr,
@@ -146,6 +189,15 @@ export async function runAgy(input: RunAgyInput): Promise<RunAgyResult> {
 
     child.on("error", (err) => {
       clearTimeout(timer);
+      const errno = err as NodeJS.ErrnoException;
+      if (errno.code === "E2BIG") {
+        reject(
+          new Error(
+            `failed to spawn agy: E2BIG (argument list too long) — prompt is ${Buffer.byteLength(input.prompt)} bytes; the prompt should travel via stdin`,
+          ),
+        );
+        return;
+      }
       reject(new Error(`failed to spawn agy: ${err.message}`));
     });
   });
