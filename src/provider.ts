@@ -56,6 +56,8 @@ interface PreparedAgyCall {
   ephemeral: boolean;
   /** Early conversation binding write triggered by agy's init event. */
   pendingBind: Promise<void> | null;
+  /** OpenCode's Plan agent is active → run agy with --mode plan (no workspace edits). */
+  planMode: boolean;
   newMessageCount: number;
 }
 
@@ -326,6 +328,35 @@ export function emptyResponseNotice(stderr: string): string {
 }
 
 /**
+ * Prepended to the first turn of every agy conversation started by the bridge.
+ * agy's interactive tools (ask_question, permission prompts) have no UI here.
+ */
+const HEADLESS_NOTE =
+  "[Bridge note: you are running non-interactively behind OpenCode. The user only sees " +
+  "your text replies — interactive tools such as ask_question are not displayed. Ask any " +
+  "questions in plain text, in the user's language.]";
+
+const PLAN_ON = "You are in Plan mode.";
+const PLAN_OFF = "You are NO LONGER in Plan mode.";
+
+/**
+ * OpenCode marks agent switches with injected <system-reminder> user messages: PLAN_ON when
+ * the Plan agent starts, PLAN_OFF when leaving it. The latest marker wins.
+ */
+export function detectPlanMode(prompt: LanguageModelV3Prompt): boolean {
+  for (let i = prompt.length - 1; i >= 0; i--) {
+    const m = prompt[i];
+    if (m.role !== "user") continue;
+    for (const part of m.content) {
+      if (part.type !== "text") continue;
+      if (part.text.includes(PLAN_OFF)) return false;
+      if (part.text.includes(PLAN_ON)) return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Stable session key when OpenCode does not send x-agy-session-id: hash of the first
  * user message, so follow-up turns of the same OpenCode session resume the same agy
  * conversation instead of starting a fresh one every turn.
@@ -365,6 +396,11 @@ function buildLanguageModel(
       try {
         mkdirSync(dirname(DEBUG_LOG), { recursive: true });
         appendFileSync(join(dirname(DEBUG_LOG), "system-prompts.log"), `\n===== ${new Date().toISOString()}\n${systemText}\n`);
+        const lastUser = { content: callOpts.prompt.filter((m) => m.role !== "system") };
+        appendFileSync(
+          join(dirname(DEBUG_LOG), "user-messages.log"),
+          `\n===== ${new Date().toISOString()}\n${JSON.stringify(lastUser?.content ?? null, null, 1)}\n`,
+        );
       } catch {
         // diagnostics only
       }
@@ -410,22 +446,26 @@ function buildLanguageModel(
       prompt = converted.text;
       warnings.push(...converted.warnings);
     } else {
-      // agy CLI expects ONE user message per call (stream-json NDJSON) and keeps the
-      // history itself via --conversation, so only the last user message is sent.
+      // agy keeps the history itself via --conversation, so only what is new since the
+      // last assistant reply is sent: the user's message plus any OpenCode-injected
+      // <system-reminder> messages (e.g. entering/leaving Plan mode).
       mode = "turn";
-      const newMessages = conversationId
-        ? callOpts.prompt.slice(entry?.processedMessages ?? 0)
-        : callOpts.prompt;
-      const lastUserMessage =
-        [...newMessages].reverse().find((m) => m.role === "user") ??
-        [...callOpts.prompt].reverse().find((m) => m.role === "user");
+      const lastAssistant = callOpts.prompt.map((m) => m.role).lastIndexOf("assistant");
+      let newUserMessages = callOpts.prompt
+        .slice(lastAssistant + 1)
+        .filter((m) => m.role === "user");
+      if (newUserMessages.length === 0) {
+        const lastUser = [...callOpts.prompt].reverse().find((m) => m.role === "user");
+        newUserMessages = lastUser ? [lastUser] : [];
+      }
+      const lastUserMessage = newUserMessages[newUserMessages.length - 1];
 
       if (!lastUserMessage) {
         throw new Error("No user message found in prompt");
       }
 
       if (enableToolConversion) {
-        const converted = formatToolPartsForAgy([lastUserMessage]);
+        const converted = formatToolPartsForAgy(newUserMessages);
         prompt = converted.text;
         warnings.push(...converted.warnings);
       } else {
@@ -460,10 +500,19 @@ function buildLanguageModel(
       });
     }
 
+    // New agy conversation: tell agy it runs headless behind OpenCode, so it doesn't
+    // reach for interactive tools (ask_question etc.) that nobody can answer.
+    if (!ephemeral && !conversationId) {
+      prompt = `${HEADLESS_NOTE}\n\n${prompt}`;
+    }
+
+    const planMode = !ephemeral && detectPlanMode(callOpts.prompt);
+
     dbg("prepare", {
       modelId,
       agent: agent ?? null,
       mode,
+      planMode,
       sessionId,
       sessionSource: ephemeral ? "ephemeral" : headerSession ? "header" : "fallback-hash",
       conversationId,
@@ -491,6 +540,7 @@ function buildLanguageModel(
       entry,
       ephemeral,
       pendingBind: null,
+      planMode,
       newMessageCount: callOpts.prompt.length,
     };
   };
@@ -509,6 +559,11 @@ function buildLanguageModel(
     }
     if (spec.effort && !extraArgs.includes("--effort")) {
       extraArgs.push("--effort", spec.effort);
+    }
+    if (prep.planMode && !extraArgs.includes("--mode")) {
+      // Hard enforcement of OpenCode's Plan agent: agy won't modify the workspace even
+      // with --dangerously-skip-permissions.
+      extraArgs.push("--mode", "plan");
     }
     const t0 = Date.now();
     let firstDelta = true;

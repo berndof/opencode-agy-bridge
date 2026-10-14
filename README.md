@@ -21,6 +21,8 @@ OpenCode ──LanguageModelV3──▶ provider ──spawn──▶ agy --mode
 - Responses **stream live** from agy's `step_update` deltas.
 - Usage maps `thinking_tokens` → reasoning and `cache_read_tokens` → cache read.
 - OpenCode's parallel **title** request runs as an isolated one-shot call on the `-low` variant.
+- OpenCode's **Plan** agent is enforced: while it is active agy runs with `--mode plan`
+  (no workspace edits), detected from OpenCode's `<system-reminder>` messages.
 - agy runs its own tools; OpenCode tool calls/results in the history are converted to text.
 
 Details and gotchas: [`docs/OPENCODE-INTEGRATION.md`](docs/OPENCODE-INTEGRATION.md) ·
@@ -104,7 +106,7 @@ opencode run --standalone --model agy/gemini-3.8-flash-low "say ok"
 
 ```bash
 AGY_BRIDGE_DEBUG=1 opencode      # per-phase timings, session/mode decisions, tool steps
-AGY_BRIDGE_DEBUG=2 opencode      # + full system prompts in ~/.opencode-agy-bridge/system-prompts.log
+AGY_BRIDGE_DEBUG=2 opencode      # + full system prompts / message lists (system-prompts.log, user-messages.log)
 tail -f ~/.opencode-agy-bridge/debug.log
 ```
 
@@ -118,7 +120,9 @@ OpenCode's own log: `~/.local/share/opencode/log/opencode.log`.
   steps as reasoning blocks. To let agy use tools, either add allow-rules to
   `~/.gemini/antigravity-cli/settings.json` (`permissions.allow`, e.g. `"command(git log)"`
   — shared with every agy session), or pass `"extraArgs": ["--dangerously-skip-permissions"]`
-  in the provider options (auto-approves everything, only for OpenCode-launched agy).
+  in the provider options (auto-approves everything, only for OpenCode-launched agy; the
+  Plan agent still blocks edits via `--mode plan`). See
+  [`docs/PERMISSIONS-AND-EFFORT.md`](docs/PERMISSIONS-AND-EFFORT.md).
 - **Startup latency:** each turn spawns a fresh `agy` (≈3–5 s before the model starts).
   A persistent per-session process is planned ([roadmap](docs/ROADMAP.md)).
 - **No structured tool calls:** agy uses its own tools inside its process.
