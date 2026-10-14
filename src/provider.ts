@@ -361,6 +361,14 @@ function buildLanguageModel(
       .filter((m) => m.role === "system")
       .map((m) => m.content as string)
       .join("\n");
+    if (process.env.AGY_BRIDGE_DEBUG === "2") {
+      try {
+        mkdirSync(dirname(DEBUG_LOG), { recursive: true });
+        appendFileSync(join(dirname(DEBUG_LOG), "system-prompts.log"), `\n===== ${new Date().toISOString()}\n${systemText}\n`);
+      } catch {
+        // diagnostics only
+      }
+    }
     const ephemeral =
       (agent ? EPHEMERAL_AGENTS.has(agent) : false) ||
       HELPER_SYSTEM_PREFIXES.some((p) => systemText.trimStart().startsWith(p));

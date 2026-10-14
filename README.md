@@ -24,6 +24,7 @@ OpenCode ──LanguageModelV3──▶ provider ──spawn──▶ agy --mode
 - agy runs its own tools; OpenCode tool calls/results in the history are converted to text.
 
 Details and gotchas: [`docs/OPENCODE-INTEGRATION.md`](docs/OPENCODE-INTEGRATION.md) ·
+permissions & effort: [`docs/PERMISSIONS-AND-EFFORT.md`](docs/PERMISSIONS-AND-EFFORT.md) ·
 ideas: [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## Requirements
@@ -93,7 +94,7 @@ opencode run --standalone --model agy/gemini-3.8-flash-low "say ok"
 | Option | Default | Description |
 |---|---|---|
 | `binary` | `"agy"` | agy executable |
-| `timeoutMs` | `300000` | per-turn timeout |
+| `timeoutMs` | `300000` | inactivity timeout (no agy output for this long kills the turn) |
 | `defaultModel` | `gemini-3.8-flash-high` | model for the `antigravity` alias |
 | `extraArgs` | `[]` | extra agy flags (e.g. `["--sandbox"]`) |
 | `stateFile` | `~/.opencode-agy-bridge/sessions.json` | session → conversation map |
@@ -102,7 +103,8 @@ opencode run --standalone --model agy/gemini-3.8-flash-low "say ok"
 ## Debugging
 
 ```bash
-AGY_BRIDGE_DEBUG=1 opencode      # per-phase timings, session/mode decisions
+AGY_BRIDGE_DEBUG=1 opencode      # per-phase timings, session/mode decisions, tool steps
+AGY_BRIDGE_DEBUG=2 opencode      # + full system prompts in ~/.opencode-agy-bridge/system-prompts.log
 tail -f ~/.opencode-agy-bridge/debug.log
 ```
 

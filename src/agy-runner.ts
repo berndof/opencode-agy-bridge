@@ -217,7 +217,21 @@ export async function runAgy(input: RunAgyInput): Promise<RunAgyResult> {
       }
     }
 
+    // Inactivity timeout: re-armed on every stdout chunk, so long agentic turns that keep
+    // making progress (tool steps, deltas) are not killed; only a silent agy is.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const armTimer = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        if (isSettled) return;
+        isSettled = true;
+        child.kill("SIGKILL");
+        reject(new Error(`agy timed out (no output for ${Math.round(timeoutMs / 1000)}s)`));
+      }, timeoutMs);
+    };
+
     child.stdout.on("data", (chunk: Buffer) => {
+      armTimer();
       stdoutChunks.push(chunk);
       stdoutBuffer += decoder.write(chunk);
       let newlineIdx: number;
@@ -247,12 +261,7 @@ export async function runAgy(input: RunAgyInput): Promise<RunAgyResult> {
       };
     }
 
-    const timer = setTimeout(() => {
-      if (isSettled) return;
-      isSettled = true;
-      child.kill("SIGKILL");
-      reject(new Error("agy timed out"));
-    }, timeoutMs);
+    armTimer();
 
     // agy can exit before reading stdin (bad flags, immediate crash); don't
     // let the write reject the promise twice.
