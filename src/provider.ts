@@ -241,6 +241,12 @@ export function extractDelta(
  */
 const EPHEMERAL_AGENTS = new Set(["title", "summary", "compaction"]);
 
+/**
+ * OpenCode 2.x does not tell providers which agent is calling, so helper calls are
+ * recognised by their system prompt.
+ */
+const HELPER_SYSTEM_PREFIXES = ["You are a title generator"];
+
 const DEBUG = !!process.env.AGY_BRIDGE_DEBUG;
 const DEBUG_LOG = join(homedir(), ".opencode-agy-bridge", "debug.log");
 
@@ -316,12 +322,27 @@ function buildLanguageModel(
 
   const prepareAgyCall = async (callOpts: LanguageModelV3CallOptions): Promise<PreparedAgyCall> => {
     const headers = callOpts.headers ?? {};
+    const header = (name: string): string | undefined => {
+      const key = Object.keys(headers).find((k) => k.toLowerCase() === name);
+      const v = key ? headers[key] : undefined;
+      return typeof v === "string" && v ? v : undefined;
+    };
     const agyOpts = callOpts.providerOptions?.agy as Record<string, unknown> | undefined;
-    const agent =
-      (headers["x-agy-agent"] as string | undefined) ?? (agyOpts?.agent as string | undefined);
-    const ephemeral = agent ? EPHEMERAL_AGENTS.has(agent) : false;
+    const agent = header("x-agy-agent") ?? (agyOpts?.agent as string | undefined);
+    const systemText = callOpts.prompt
+      .filter((m) => m.role === "system")
+      .map((m) => m.content as string)
+      .join("\n");
+    const ephemeral =
+      (agent ? EPHEMERAL_AGENTS.has(agent) : false) ||
+      HELPER_SYSTEM_PREFIXES.some((p) => systemText.trimStart().startsWith(p));
+    // OpenCode 2.x sends the session natively (x-opencode-session / X-Session-Id);
+    // x-agy-session-id is the legacy OpenCode 1.x plugin header.
     const headerSession =
-      (headers["x-agy-session-id"] as string | undefined) ?? (agyOpts?.sessionId as string | undefined);
+      header("x-opencode-session") ??
+      header("x-session-id") ??
+      header("x-agy-session-id") ??
+      (agyOpts?.sessionId as string | undefined);
     const sessionId = ephemeral
       ? `ephemeral-${randomUUID()}`
       : headerSession ?? fallbackSessionId(callOpts.prompt);
@@ -412,6 +433,17 @@ function buildLanguageModel(
       conversationId,
       promptChars: prompt.length,
       messages: callOpts.prompt.length,
+      headers: Object.fromEntries(
+        Object.entries(headers).map(([k, v]) => [
+          k,
+          /auth|key|token|ticket|cookie/i.test(k) ? "<redacted>" : String(v).slice(0, 80),
+        ]),
+      ),
+      providerOptions: JSON.stringify(callOpts.providerOptions ?? {}).slice(0, 400),
+      systemPrefix: callOpts.prompt
+        .filter((m) => m.role === "system")
+        .map((m) => (m.content as string).slice(0, 160))
+        .join(" | "),
     });
 
     return {
@@ -434,10 +466,13 @@ function buildLanguageModel(
   ) => {
     const spec = resolveAgyModelSpec(modelId, opts.defaultModel);
     const extraArgs = [...(opts.extraArgs ?? [])];
-    // Title/summary prompts don't benefit from deep thinking; it only adds latency.
-    const effort = prep.ephemeral ? "low" : spec.effort;
-    if (effort && !extraArgs.includes("--effort")) {
-      extraArgs.push("--effort", effort);
+    if (prep.ephemeral) {
+      // Title/summary prompts don't benefit from deep thinking; use the -low variant if any.
+      const low = spec.model.replace(/-(high|medium)$/, "-low");
+      if (low !== spec.model && KNOWN_MODEL_IDS.has(low)) spec.model = low;
+    }
+    if (spec.effort && !extraArgs.includes("--effort")) {
+      extraArgs.push("--effort", spec.effort);
     }
     const t0 = Date.now();
     let firstDelta = true;

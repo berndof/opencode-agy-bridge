@@ -1,147 +1,58 @@
 /**
- * Known Antigravity/Gemini and Claude models supported by the agy CLI.
- * Verified dynamically against the running agy CLI binary.
+ * Model catalog for the agy CLI.
+ *
+ * IDs and names mirror `agy models` exactly, and the ID is passed verbatim to
+ * `agy --model` (the effort variant is part of the ID). Keep this list in sync
+ * with `agy models` when the CLI adds/removes models.
  */
 
 export interface KnownModel {
-  /** The model ID exposed to OpenCode (e.g. "gemini-3.8-flash-high") */
+  /** Model ID exposed to OpenCode — identical to the `agy models` ID. */
   id: string;
-  /** Friendly display name in OpenCode */
+  /** Display name — identical to the `agy models` name. */
   name: string;
-  /** The actual --model argument passed to the agy CLI */
-  agyModel: string;
-  /** The optional --effort argument passed to the agy CLI ("low" | "medium" | "high") */
-  agyEffort?: string;
   /** Model family for grouping in UI */
-  family?: string;
+  family: string;
 }
 
 export const KNOWN_AGY_MODELS: readonly KnownModel[] = [
-  // Gemini 3.8 Flash series
-  {
-    id: "gemini-3.8-flash-high",
-    name: "Gemini 3.8 Flash (High)",
-    agyModel: "gemini-3.8-flash",
-    agyEffort: "high",
-    family: "gemini-3.8",
-  },
-  {
-    id: "gemini-3.8-flash-low",
-    name: "Gemini 3.8 Flash (Low)",
-    agyModel: "gemini-3.8-flash",
-    agyEffort: "low",
-    family: "gemini-3.8",
-  },
-
-  // Gemini 4 Argon series (Latest Deep Reasoning)
-  {
-    id: "gemini-4-argon-high",
-    name: "Gemini 4 Argon (High)",
-    agyModel: "gemini-4-argon",
-    agyEffort: "high",
-    family: "gemini-4",
-  },
-  {
-    id: "gemini-4-argon-low",
-    name: "Gemini 4 Argon (Low)",
-    agyModel: "gemini-4-argon",
-    agyEffort: "low",
-    family: "gemini-4",
-  },
-
-  // Claude 5.5 Sonnet series
-  {
-    id: "claude-sonnet-5.5-high",
-    name: "Claude Sonnet 5.5 (High)",
-    agyModel: "Claude Sonnet 5.5 (High)",
-    family: "claude-5.5",
-  },
-  {
-    id: "claude-sonnet-5.5-low",
-    name: "Claude Sonnet 5.5 (Low)",
-    agyModel: "Claude Sonnet 5.5 (Low)",
-    family: "claude-5.5",
-  },
-
-  // Claude 5.5 Opus series
-  {
-    id: "claude-opus-5.5-high",
-    name: "Claude Opus 5.5 (High)",
-    agyModel: "Claude Opus 5.5 (High)",
-    family: "claude-5.5",
-  },
-  {
-    id: "claude-opus-5.5-low",
-    name: "Claude Opus 5.5 (Low)",
-    agyModel: "Claude Opus 5.5 (Low)",
-    family: "claude-5.5",
-  },
-
-  // Compatibility aliases for older Gemini versions (mapped to modern equivalents)
-  {
-    id: "gemini-3.1-pro",
-    name: "Gemini 3.1 Pro (→ Gemini 4 Argon High)",
-    agyModel: "gemini-4-argon",
-    agyEffort: "high",
-    family: "gemini-4",
-  },
-  {
-    id: "gemini-3.1-pro-high",
-    name: "Gemini 3.1 Pro High (→ Gemini 4 Argon High)",
-    agyModel: "gemini-4-argon",
-    agyEffort: "high",
-    family: "gemini-4",
-  },
-  {
-    id: "gemini-3.1-pro-low",
-    name: "Gemini 3.1 Pro Low (→ Gemini 4 Argon Low)",
-    agyModel: "gemini-4-argon",
-    agyEffort: "low",
-    family: "gemini-4",
-  },
-  {
-    id: "gemini-3.6-flash-high",
-    name: "Gemini 3.6 Flash High (→ Gemini 3.8 Flash High)",
-    agyModel: "gemini-3.8-flash",
-    agyEffort: "high",
-    family: "gemini-3.8",
-  },
-  {
-    id: "gemini-3.6-flash-low",
-    name: "Gemini 3.6 Flash Low (→ Gemini 3.8 Flash Low)",
-    agyModel: "gemini-3.8-flash",
-    agyEffort: "low",
-    family: "gemini-3.8",
-  },
-  {
-    id: "gemini-3.6-pro-high",
-    name: "Gemini 3.6 Pro High (→ Gemini 4 Argon High)",
-    agyModel: "gemini-4-argon",
-    agyEffort: "high",
-    family: "gemini-4",
-  },
-  {
-    id: "gemini-3.6-pro-low",
-    name: "Gemini 3.6 Pro Low (→ Gemini 4 Argon Low)",
-    agyModel: "gemini-4-argon",
-    agyEffort: "low",
-    family: "gemini-4",
-  },
-
-  // Cosmetic alias
-  {
-    id: "antigravity",
-    name: "Antigravity (Default)",
-    agyModel: "gemini-3.8-flash",
-    agyEffort: "high",
-    family: "alias",
-  },
+  { id: "gemini-4-argon-high", name: "Gemini 4 Argon (High)", family: "gemini-4" },
+  { id: "gemini-4-argon-medium", name: "Gemini 4 Argon (Medium)", family: "gemini-4" },
+  { id: "gemini-4-argon-low", name: "Gemini 4 Argon (Low)", family: "gemini-4" },
+  { id: "gemini-3.8-flash-high", name: "Gemini 3.8 Flash (High)", family: "gemini-3.8" },
+  { id: "gemini-3.8-flash-medium", name: "Gemini 3.8 Flash (Medium)", family: "gemini-3.8" },
+  { id: "gemini-3.8-flash-low", name: "Gemini 3.8 Flash (Low)", family: "gemini-3.8" },
+  { id: "claude-opus-5-5-high", name: "Claude Opus 5.5 (High)", family: "claude-5.5" },
+  { id: "claude-opus-5-5-medium", name: "Claude Opus 5.5 (Medium)", family: "claude-5.5" },
+  { id: "claude-opus-5-5-low", name: "Claude Opus 5.5 (Low)", family: "claude-5.5" },
+  { id: "claude-sonnet-5-5-high", name: "Claude Sonnet 5.5 (High)", family: "claude-5.5" },
+  { id: "claude-sonnet-5-5-medium", name: "Claude Sonnet 5.5 (Medium)", family: "claude-5.5" },
+  { id: "claude-sonnet-5-5-low", name: "Claude Sonnet 5.5 (Low)", family: "claude-5.5" },
+  { id: "gpt-oss-120b-medium", name: "GPT-OSS 120B (Medium)", family: "gpt-oss" },
 ];
+
+/**
+ * Hidden legacy IDs (old OpenCode configs/sessions) -> current agy ID.
+ * Not listed in the UI; only resolved so existing sessions keep working.
+ */
+export const LEGACY_MODEL_ALIASES: Readonly<Record<string, string>> = {
+  "claude-sonnet-5.5-high": "claude-sonnet-5-5-high",
+  "claude-sonnet-5.5-low": "claude-sonnet-5-5-low",
+  "claude-opus-5.5-high": "claude-opus-5-5-high",
+  "claude-opus-5.5-low": "claude-opus-5-5-low",
+  "gemini-3.1-pro": "gemini-4-argon-high",
+  "gemini-3.1-pro-high": "gemini-4-argon-high",
+  "gemini-3.1-pro-low": "gemini-4-argon-low",
+  "gemini-3.6-pro-high": "gemini-4-argon-high",
+  "gemini-3.6-pro-low": "gemini-4-argon-low",
+  "gemini-3.6-flash-high": "gemini-3.8-flash-high",
+  "gemini-3.6-flash-low": "gemini-3.8-flash-low",
+};
 
 /** All known model IDs for quick lookup */
 export const KNOWN_MODEL_IDS = new Set(KNOWN_AGY_MODELS.map((m) => m.id));
 
-/** Model IDs that are cosmetic aliases */
+/** Model IDs that resolve to the configured defaultModel */
 export const COSMETIC_MODEL_IDS = new Set(["antigravity"]);
 
 /** Default model when cosmetic alias "antigravity" is used */
@@ -153,16 +64,13 @@ export interface ResolvedAgyModelSpec {
 }
 
 /**
- * Resolve a model ID to the CLI model arguments (--model and optional --effort).
+ * Resolve an OpenCode model ID to the agy CLI arguments. Catalog IDs pass through
+ * verbatim (no separate --effort: the variant is part of the ID).
  */
 export function resolveAgyModelSpec(modelId: string, defaultModel?: string): ResolvedAgyModelSpec {
-  const targetId = COSMETIC_MODEL_IDS.has(modelId) ? (defaultModel ?? DEFAULT_AGY_MODEL) : modelId;
-  const known = KNOWN_AGY_MODELS.find((m) => m.id === targetId);
-  if (known) {
-    return { model: known.agyModel, effort: known.agyEffort };
-  }
-  // Unknown model: pass as-is to agy
-  return { model: targetId };
+  let id = COSMETIC_MODEL_IDS.has(modelId) ? (defaultModel ?? DEFAULT_AGY_MODEL) : modelId;
+  id = LEGACY_MODEL_ALIASES[id] ?? id;
+  return { model: id };
 }
 
 /** Legacy helper */
@@ -171,19 +79,18 @@ export function resolveAgyModel(modelId: string, opts: { defaultModel?: string }
 }
 
 export function isKnownModel(modelId: string): boolean {
-  return KNOWN_MODEL_IDS.has(modelId);
+  return KNOWN_MODEL_IDS.has(LEGACY_MODEL_ALIASES[modelId] ?? modelId);
 }
 
 export function getModelName(modelId: string): string {
-  const known = KNOWN_AGY_MODELS.find((m) => m.id === modelId);
-  return known?.name ?? modelId;
+  const id = LEGACY_MODEL_ALIASES[modelId] ?? modelId;
+  return KNOWN_AGY_MODELS.find((m) => m.id === id)?.name ?? modelId;
 }
 
 export function getModelsByFamily(): Record<string, KnownModel[]> {
   const groups: Record<string, KnownModel[]> = {};
   for (const model of KNOWN_AGY_MODELS) {
-    const family = model.family ?? "other";
-    (groups[family] ??= []).push(model);
+    (groups[model.family] ??= []).push(model);
   }
   return groups;
 }
