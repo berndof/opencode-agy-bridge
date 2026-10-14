@@ -88,12 +88,13 @@ describe("SessionStore", () => {
   });
 
   test("binding lock serializes concurrent access", async () => {
+    const lockPath = join(dir, "binding.lock");
     // Acquire first lock — should succeed
-    const release1 = await SessionStore.acquireBindingLock();
+    const release1 = await SessionStore.acquireBindingLock(lockPath);
     expect(release1).toBeInstanceOf(Function);
 
     // Second acquisition should time out (but we release and retry)
-    const release2Promise = SessionStore.acquireBindingLock();
+    const release2Promise = SessionStore.acquireBindingLock(lockPath);
 
     // Release first lock
     await release1();

@@ -22,6 +22,7 @@ export interface AgyToolStep {
   name: string;
   state: string;
   parameters: Record<string, unknown>;
+  output?: unknown;
 }
 
 export interface AgyUsage {
@@ -187,7 +188,7 @@ export async function runAgy(input: RunAgyInput): Promise<RunAgyResult> {
             state?: string;
             text_delta?: string;
             tool_name?: string;
-            tool_info?: { name?: string; parameters?: Record<string, unknown> };
+            tool_info?: { name?: string; parameters?: Record<string, unknown>; output?: unknown };
           };
         };
         const convId = parsed.conversation_id ?? parsed.step_update?.conversation_id;
@@ -202,6 +203,7 @@ export async function runAgy(input: RunAgyInput): Promise<RunAgyResult> {
             name: su.tool_name ?? su.tool_info?.name ?? "tool",
             state: su.state ?? "",
             parameters: su.tool_info?.parameters ?? {},
+            ...(su.tool_info?.output !== undefined ? { output: su.tool_info.output } : {}),
           });
         }
         if (

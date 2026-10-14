@@ -72,8 +72,8 @@ export class SessionStore {
    * Acquires a global lock for the bind-while-running phase.
    * Prevents concurrent agy instances from creating ambiguous .pb files.
    */
-  static acquireBindingLock(): Promise<() => Promise<void>> {
-    return acquireLock(defaultBindingLockPath());
+  static acquireBindingLock(lockPath?: string): Promise<() => Promise<void>> {
+    return acquireLock(lockPath ?? defaultBindingLockPath());
   }
 
   async getEntry(sessionId: string): Promise<StoreEntry | null> {

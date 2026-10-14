@@ -1,6 +1,6 @@
 # Permissions and effort control — evaluation
 
-Status: Plan-mode enforcement (option D) **implemented**; effort via ctrl+t **designed, not implemented**. Facts below were verified on OpenCode 2.0.16 and the
+Status: Plan-mode enforcement (option D), native tool cards (option F), and effort via ctrl+t **implemented**. Facts below were verified on OpenCode 2.0.16 and the
 current agy CLI (2026-10-14).
 
 ## Verified facts
@@ -18,9 +18,7 @@ current agy CLI (2026-10-14).
 | F9 | agy merges project configs from `~/.gemini/config/projects/` over the global `~/.gemini/antigravity-cli/settings.json` (shared by every agy session, incl. the Antigravity CLI). | agy changelog |
 | F10 | `agy models` ids embed the effort (`gemini-4-argon-low|medium|high`); agy also accepts `--effort low|medium|high|xhigh|max`. | `agy models`, `agy --help` |
 
-## 1. Effort via ctrl+t (variants)
-
-**Feasible now** (F5, F10).
+## 1. Effort via ctrl+t (variants) — **implemented**
 
 Config — one OpenCode model per family, effort as variants:
 
@@ -35,20 +33,12 @@ Config — one OpenCode model per family, effort as variants:
 }
 ```
 
-Bridge change (small):
-
-```ts
-const effort = callOpts.providerOptions?.agy?.effort ?? opts.defaultEffort;   // e.g. "medium"
-const candidate = `${modelId}-${effort}`;
-model = KNOWN_MODEL_IDS.has(candidate) ? candidate : resolveAgyModelSpec(modelId).model;
-```
-
 - Families: `gemini-4-argon`, `gemini-3.8-flash`, `claude-opus-5-5`, `claude-sonnet-5-5`
   (low/medium/high) and `gpt-oss-120b` (medium only → no variants).
 - Full ids (`gemini-4-argon-high`) keep working, so old sessions/configs don't break.
 - Title calls keep forcing `-low`.
-- **To verify:** switching variant mid-session resumes the same agy conversation with a
-  different `--model` (expected to work; agy conversations aren't model-bound).
+- **Verified:** switching variant/model mid-session resumes the same agy conversation with a
+  different `--model` (agy conversations aren't model-bound).
 
 ## 2. Permissions
 
@@ -68,23 +58,10 @@ agent **don't apply** to them.
 | C. Policy per **model entry** | per model pick | small | e.g. `gemini-4-argon` (skip) and `gemini-4-argon-plan` (`--mode plan`), via a model option `"permission": "skip" \| "plan" \| "ask"`. |
 | D. Follow OpenCode's Plan agent automatically | automatic | **implemented** | Latest reminder marker in the history (F7) → `--mode plan` (F8). Verified: Plan refused to create a file; switching to Build in the same session created it. |
 | E. Project allow-rules generated from OpenCode `permission` config | per project, per command | medium | Write agy project config (F9) with `command(<prefix>)` rules mirroring OpenCode's `bash` allow list; leave the rest denied (agy then explains, the bridge shows it). No global side effects. |
-| F. Show agy tools as real tool cards | visibility only | small | Emit provider-executed `tool-call`/`tool-result` (F4) instead of reasoning text. Pairs with any option above. |
+| F. Show agy tools as real tool cards | visibility only | **implemented** | Emit provider-executed `tool-call`/`tool-result` (F4) with `tool_info.output` (configurable via `emitToolCards`, default `true`). |
 
 ### Current setup
 
 `extraArgs: ["--dangerously-skip-permissions"]` (A) **plus** automatic `--mode plan` while
-OpenCode's Plan agent is active (D). Build runs unrestricted; Plan is enforced by agy itself.
-
-Before D, agy already *declined* edits in Plan because the reminder text reached it, but that
-was only an instruction. `--mode plan` makes it a hard block.
-
-### Further options
-
-1. **C + F**. Each model picks a policy through an option resolved in the bridge:
-   - `skip` → `--dangerously-skip-permissions`
-   - `plan` → `--mode plan` (safe, verified F8)
-   - `ask` → no flag (agy denies; the bridge shows why)
-
-   Default `skip`, plus `-plan` entries for read-only work. Tool cards (F) make it visible
-   what agy did.
-3. **E** if you want per-command control without the global settings file.
+OpenCode's Plan agent is active (D), **plus** provider-executed tool cards (F). Build runs
+unrestricted; Plan is enforced by agy itself.

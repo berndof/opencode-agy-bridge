@@ -19,6 +19,11 @@ OpenCode ──LanguageModelV3──▶ provider ──spawn──▶ agy --mode
   header; mapping persisted in `~/.opencode-agy-bridge/sessions.json`). Only the newest user
   message is sent each turn — agy keeps the history.
 - Responses **stream live** from agy's `step_update` deltas.
+- agy's internal tool steps (`run_command`, `view_file`, …) are emitted as **provider-executed
+  tool cards** (`tool-call` + `tool-result` with `providerExecuted: true`).
+- **Effort variants (`ctrl+t` / `/variants`)**: base family model ids (`gemini-4-argon`,
+  `claude-sonnet-5-5`, …) resolve the selected `effort` variant (`low` / `medium` / `high`)
+  from `providerOptions.agy.effort`.
 - Usage maps `thinking_tokens` → reasoning and `cache_read_tokens` → cache read.
 - OpenCode's parallel **title** request runs as an isolated one-shot call on the `-low` variant.
 - OpenCode's **Plan** agent is enforced: while it is active agy runs with `--mode plan`
@@ -61,28 +66,50 @@ npm install && npm run build
         "defaultModel": "gemini-3.8-flash-high"   // used by the "antigravity" alias
       },
       "models": {
-        "gemini-4-argon-high":      { "name": "Gemini 4 Argon (High)" },
-        "gemini-4-argon-medium":    { "name": "Gemini 4 Argon (Medium)" },
-        "gemini-4-argon-low":       { "name": "Gemini 4 Argon (Low)" },
-        "gemini-3.8-flash-high":    { "name": "Gemini 3.8 Flash (High)" },
-        "gemini-3.8-flash-medium":  { "name": "Gemini 3.8 Flash (Medium)" },
-        "gemini-3.8-flash-low":     { "name": "Gemini 3.8 Flash (Low)" },
-        "claude-opus-5-5-high":     { "name": "Claude Opus 5.5 (High)" },
-        "claude-opus-5-5-medium":   { "name": "Claude Opus 5.5 (Medium)" },
-        "claude-opus-5-5-low":      { "name": "Claude Opus 5.5 (Low)" },
-        "claude-sonnet-5-5-high":   { "name": "Claude Sonnet 5.5 (High)" },
-        "claude-sonnet-5-5-medium": { "name": "Claude Sonnet 5.5 (Medium)" },
-        "claude-sonnet-5-5-low":    { "name": "Claude Sonnet 5.5 (Low)" },
-        "gpt-oss-120b-medium":      { "name": "GPT-OSS 120B (Medium)" }
+        // Option A: one entry per family with ctrl+t effort variants
+        "gemini-4-argon": {
+          "name": "Gemini 4 Argon",
+          "variants": {
+            "low":    { "effort": "low" },
+            "medium": { "effort": "medium" },
+            "high":   { "effort": "high" }
+          }
+        },
+        "gemini-3.8-flash": {
+          "name": "Gemini 3.8 Flash",
+          "variants": {
+            "low":    { "effort": "low" },
+            "medium": { "effort": "medium" },
+            "high":   { "effort": "high" }
+          }
+        },
+        "claude-opus-5-5": {
+          "name": "Claude Opus 5.5",
+          "variants": {
+            "low":    { "effort": "low" },
+            "medium": { "effort": "medium" },
+            "high":   { "effort": "high" }
+          }
+        },
+        "claude-sonnet-5-5": {
+          "name": "Claude Sonnet 5.5",
+          "variants": {
+            "low":    { "effort": "low" },
+            "medium": { "effort": "medium" },
+            "high":   { "effort": "high" }
+          }
+        },
+        "gpt-oss-120b": { "name": "GPT-OSS 120B" }
       }
     }
   }
 }
 ```
 
-Model ids are exactly those of `agy models` and are passed verbatim to `agy --model`.
-Old ids (`claude-sonnet-5.5-high`, `gemini-3.1-pro`, `gemini-3.6-*`) still resolve but
-aren't listed. No `plugin` entry is needed on OpenCode 2.x.
+Both base family ids (`gemini-4-argon` with `variants`) and full `agy models` ids
+(`gemini-4-argon-high`, `gemini-4-argon-medium`, `gemini-4-argon-low`, …) are supported.
+Old ids (`claude-sonnet-5.5-high`, `gemini-3.1-pro`, `gemini-3.6-*`) still resolve too.
+No `plugin` entry is needed on OpenCode 2.x.
 
 **After every rebuild, restart OpenCode** — the server keeps the old module in memory.
 Quick check without touching a running session:
@@ -98,9 +125,11 @@ opencode run --standalone --model agy/gemini-3.8-flash-low "say ok"
 | `binary` | `"agy"` | agy executable |
 | `timeoutMs` | `300000` | inactivity timeout (no agy output for this long kills the turn) |
 | `defaultModel` | `gemini-3.8-flash-high` | model for the `antigravity` alias |
+| `defaultEffort` | `"high"` | fallback effort (`low`\|`medium`\|`high`) for base family models |
 | `extraArgs` | `[]` | extra agy flags (e.g. `["--sandbox"]`) |
 | `stateFile` | `~/.opencode-agy-bridge/sessions.json` | session → conversation map |
 | `enableToolConversion` | `true` | render tool calls/results in history as text |
+| `emitToolCards` | `true` | emit agy tool steps as `providerExecuted` tool cards (`false` = reasoning blocks) |
 
 ## Debugging
 
@@ -116,8 +145,8 @@ OpenCode's own log: `~/.local/share/opencode/log/opencode.log`.
 
 - **agy tool permissions (headless):** agy runs its own tools, but in headless mode it
   **auto-denies** any tool that would need an approval prompt and ends the turn with no
-  text. The bridge shows agy's explanation instead of an empty reply, and lists agy's tool
-  steps as reasoning blocks. To let agy use tools, either add allow-rules to
+  text. The bridge shows agy's explanation instead of an empty reply, and emits agy's tool
+  steps as provider-executed tool cards. To let agy use tools, either add allow-rules to
   `~/.gemini/antigravity-cli/settings.json` (`permissions.allow`, e.g. `"command(git log)"`
   — shared with every agy session), or pass `"extraArgs": ["--dangerously-skip-permissions"]`
   in the provider options (auto-approves everything, only for OpenCode-launched agy; the
@@ -125,7 +154,7 @@ OpenCode's own log: `~/.local/share/opencode/log/opencode.log`.
   [`docs/PERMISSIONS-AND-EFFORT.md`](docs/PERMISSIONS-AND-EFFORT.md).
 - **Startup latency:** each turn spawns a fresh `agy` (≈3–5 s before the model starts).
   A persistent per-session process is planned ([roadmap](docs/ROADMAP.md)).
-- **No structured tool calls:** agy uses its own tools inside its process.
+- **No client-executed tool calls:** agy uses its own tools inside its process (rendered as provider-executed tool cards).
 - **No images/files:** file parts are dropped with a warning.
 - **Finish reason** is always `stop` on success.
 

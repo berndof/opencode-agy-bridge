@@ -3,6 +3,7 @@ import type {
   LanguageModelV3,
   LanguageModelV3CallOptions,
   LanguageModelV3StreamPart,
+  LanguageModelV3ToolResult,
   SharedV3Warning,
   EmbeddingModelV3,
   ImageModelV3,
@@ -24,6 +25,8 @@ import {
   KNOWN_AGY_MODELS,
   KNOWN_MODEL_IDS,
   COSMETIC_MODEL_IDS,
+  BASE_FAMILY_DEFAULTS,
+  BASE_FAMILY_NAMES,
   isKnownModel,
   getModelName,
   getModelsByFamily,
@@ -40,8 +43,12 @@ export interface AgyProviderOptions {
   timeoutMs?: number;
   /** Real agy model used when the OpenCode model id is the cosmetic "antigravity". */
   defaultModel?: string;
+  /** Default reasoning effort ("low" | "medium" | "high" | "xhigh" | "max") for base family models when no variant is selected. */
+  defaultEffort?: string;
   /** Enable tool-call to text conversion (default: true). When enabled, tool calls are formatted as instructions for agy. */
   enableToolConversion?: boolean;
+  /** Emit agy's internal tool steps as provider-executed tool-call/tool-result stream parts (default: true). When false, emits reasoning blocks. */
+  emitToolCards?: boolean;
 }
 
 /** Result of preparing a call to agy */
@@ -58,6 +65,8 @@ interface PreparedAgyCall {
   pendingBind: Promise<void> | null;
   /** OpenCode's Plan agent is active → run agy with --mode plan (no workspace edits). */
   planMode: boolean;
+  /** Per-call reasoning effort from OpenCode variant selection (ctrl+t / providerOptions.agy.effort). */
+  effort?: string;
   newMessageCount: number;
 }
 
@@ -316,6 +325,22 @@ export function describeToolStep(step: AgyToolStep): string {
   return `${step.name}: ${oneLine.length > 200 ? oneLine.slice(0, 200) + "…" : oneLine}`;
 }
 
+/** Convert an agy tool step's output into a non-nullable JSON-serializable result for V3 tool-result parts. */
+export function toToolResultValue(step: AgyToolStep): LanguageModelV3ToolResult["result"] {
+  if (step.output !== undefined && step.output !== null) {
+    if (
+      typeof step.output === "string" ||
+      typeof step.output === "number" ||
+      typeof step.output === "boolean" ||
+      Array.isArray(step.output) ||
+      typeof step.output === "object"
+    ) {
+      return step.output as LanguageModelV3ToolResult["result"];
+    }
+  }
+  return describeToolStep(step);
+}
+
 /**
  * agy reports some empty turns only on stderr — notably tools auto-denied in headless
  * mode ("a tool required the \"command\" permission …"). Surface that instead of an
@@ -388,6 +413,10 @@ function buildLanguageModel(
     };
     const agyOpts = callOpts.providerOptions?.agy as Record<string, unknown> | undefined;
     const agent = header("x-agy-agent") ?? (agyOpts?.agent as string | undefined);
+    const effort =
+      typeof agyOpts?.effort === "string" && agyOpts.effort.trim()
+        ? agyOpts.effort.trim().toLowerCase()
+        : undefined;
     const systemText = callOpts.prompt
       .filter((m) => m.role === "system")
       .map((m) => m.content as string)
@@ -510,6 +539,7 @@ function buildLanguageModel(
 
     dbg("prepare", {
       modelId,
+      effort: effort ?? null,
       agent: agent ?? null,
       mode,
       planMode,
@@ -541,6 +571,7 @@ function buildLanguageModel(
       ephemeral,
       pendingBind: null,
       planMode,
+      effort,
       newMessageCount: callOpts.prompt.length,
     };
   };
@@ -550,12 +581,17 @@ function buildLanguageModel(
     abortSignal: AbortSignal | undefined,
     handlers: StreamHandlers = {},
   ) => {
-    const spec = resolveAgyModelSpec(modelId, opts.defaultModel);
+    const spec = resolveAgyModelSpec(modelId, {
+      defaultModel: opts.defaultModel,
+      defaultEffort: opts.defaultEffort,
+      effort: prep.effort,
+    });
     const extraArgs = [...(opts.extraArgs ?? [])];
     if (prep.ephemeral) {
       // Title/summary prompts don't benefit from deep thinking; use the -low variant if any.
       const low = spec.model.replace(/-(high|medium)$/, "-low");
       if (low !== spec.model && KNOWN_MODEL_IDS.has(low)) spec.model = low;
+      delete spec.effort;
     }
     if (spec.effort && !extraArgs.includes("--effort")) {
       extraArgs.push("--effort", spec.effort);
@@ -743,28 +779,76 @@ function buildLanguageModel(
           }
         };
 
-        // agy's own tool calls (run_command, view_file, ...) are shown as reasoning blocks.
-        const openTools = new Set<string>();
+        // agy's own tool calls (run_command, view_file, ...) are emitted as provider-executed
+        // tool-call/tool-result stream parts (or reasoning blocks when emitToolCards is false).
+        const emitToolCards = opts.emitToolCards ?? true;
+        let toolSeq = 0;
+        const openTools = new Map<string, AgyToolStep>();
         const onToolStep = (step: AgyToolStep) => {
           if (ac.signal.aborted) return;
-          const rid = `agy-tool-${step.index}`;
+          const rid = step.index >= 0 ? `agy-tool-${step.index}` : `agy-tool-seq-${++toolSeq}`;
           const active = step.state === "ACTIVE";
+          const toolName = step.name || "tool";
+
+          if (!emitToolCards) {
+            if (!openTools.has(rid)) {
+              closeText();
+              openTools.set(rid, step);
+              enqueue({ type: "reasoning-start", id: rid });
+              enqueue({ type: "reasoning-delta", id: rid, delta: `▸ ${describeToolStep(step)}` });
+            }
+            if (!active) {
+              if (step.state && step.state !== "DONE") {
+                enqueue({ type: "reasoning-delta", id: rid, delta: ` (${step.state.toLowerCase()})` });
+              }
+              enqueue({ type: "reasoning-end", id: rid });
+              openTools.delete(rid);
+            }
+            return;
+          }
+
           if (!openTools.has(rid)) {
             closeText();
-            openTools.add(rid);
-            enqueue({ type: "reasoning-start", id: rid });
-            enqueue({ type: "reasoning-delta", id: rid, delta: `▸ ${describeToolStep(step)}` });
+            openTools.set(rid, step);
+            enqueue({
+              type: "tool-call",
+              toolCallId: rid,
+              toolName,
+              input: JSON.stringify(step.parameters ?? {}),
+              providerExecuted: true,
+              dynamic: true,
+            });
+          } else {
+            openTools.set(rid, step);
           }
+
           if (!active) {
-            if (step.state && step.state !== "DONE") {
-              enqueue({ type: "reasoning-delta", id: rid, delta: ` (${step.state.toLowerCase()})` });
-            }
-            enqueue({ type: "reasoning-end", id: rid });
+            const isError = Boolean(step.state && step.state !== "DONE");
+            enqueue({
+              type: "tool-result",
+              toolCallId: rid,
+              toolName,
+              result: toToolResultValue(step),
+              ...(isError ? { isError: true } : {}),
+              dynamic: true,
+            });
             openTools.delete(rid);
           }
         };
         const closeTools = () => {
-          for (const rid of openTools) enqueue({ type: "reasoning-end", id: rid });
+          for (const [rid, step] of openTools) {
+            if (!emitToolCards) {
+              enqueue({ type: "reasoning-end", id: rid });
+            } else {
+              enqueue({
+                type: "tool-result",
+                toolCallId: rid,
+                toolName: step.name || "tool",
+                result: toToolResultValue(step),
+                dynamic: true,
+              });
+            }
+          }
           openTools.clear();
         };
 

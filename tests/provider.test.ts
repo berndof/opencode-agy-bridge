@@ -129,4 +129,89 @@ exit 0
       expect(result.usage.outputTokens.total).toBe(4);
     });
   });
+
+  test("emits providerExecuted tool-call and tool-result parts for agy tool steps", async () => {
+    const bin = `#!/usr/bin/env bash
+cat - > /dev/null
+echo '${JSON.stringify({ event: "step_update", step_update: { step_type: "agent_response", text_delta: "Checking... ", state: "ACTIVE" } })}'
+echo '${JSON.stringify({ event: "step_update", step_update: { step_index: 1, step_type: "tool", state: "ACTIVE", tool_name: "run_command", tool_info: { name: "run_command", parameters: { CommandLine: "git status" } } } })}'
+echo '${JSON.stringify({ event: "step_update", step_update: { step_index: 1, step_type: "tool", state: "DONE", tool_name: "run_command", tool_info: { name: "run_command", parameters: { CommandLine: "git status" }, output: "On branch main" } } })}'
+echo '${JSON.stringify({ event: "step_update", step_update: { step_type: "agent_response", text_delta: "Clean!", state: "DONE" } })}'
+echo '${JSON.stringify({ event: "result", result: { conversation_id: "conv-tool-1", status: "SUCCESS", response: "Checking... Clean!", usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 } } })}'
+exit 0
+`;
+    await withMock(bin, async (dir, mockBin, stateFile) => {
+      const provider = createAgyProvider({
+        binary: mockBin,
+        stateFile,
+        conversationsDir: dir,
+      });
+
+      const model = provider("gemini-4-argon");
+      const { stream } = await model.doStream({
+        prompt: [{ role: "user", content: [{ type: "text", text: "status?" }] }],
+      });
+
+      const parts = await readAllStreamParts(stream);
+      const toolCalls = parts.filter((p) => p.type === "tool-call") as Array<{
+        type: "tool-call";
+        toolCallId: string;
+        toolName: string;
+        input: string;
+        providerExecuted?: boolean;
+        dynamic?: boolean;
+      }>;
+      const toolResults = parts.filter((p) => p.type === "tool-result") as Array<{
+        type: "tool-result";
+        toolCallId: string;
+        toolName: string;
+        result: unknown;
+        isError?: boolean;
+      }>;
+
+      expect(toolCalls).toHaveLength(1);
+      expect(toolCalls[0]).toEqual({
+        type: "tool-call",
+        toolCallId: "agy-tool-1",
+        toolName: "run_command",
+        input: JSON.stringify({ CommandLine: "git status" }),
+        providerExecuted: true,
+        dynamic: true,
+      });
+
+      expect(toolResults).toHaveLength(1);
+      expect(toolResults[0].toolCallId).toBe("agy-tool-1");
+      expect(toolResults[0].toolName).toBe("run_command");
+      expect(toolResults[0].result).toBe("On branch main");
+      expect(toolResults[0].isError).toBeUndefined();
+    });
+  });
+
+  test("routes ctrl+t variant effort from providerOptions.agy.effort to agy --model", async () => {
+    const bin = `#!/usr/bin/env bash
+cat - > /dev/null
+printf '{"event":"result","result":{"conversation_id":"conv-eff-1","status":"SUCCESS","response":"args: %s"}}\\n' "$*"
+exit 0
+`;
+    await withMock(bin, async (dir, mockBin, stateFile) => {
+      const provider = createAgyProvider({
+        binary: mockBin,
+        stateFile,
+        conversationsDir: dir,
+      });
+
+      const model = provider("gemini-4-argon");
+      const { stream } = await model.doStream({
+        prompt: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+        providerOptions: { agy: { effort: "low" } },
+      });
+
+      const parts = await readAllStreamParts(stream);
+      const text = parts
+        .filter((p) => p.type === "text-delta")
+        .map((p) => (p as { delta: string }).delta)
+        .join("");
+      expect(text).toContain("--model gemini-4-argon-low");
+    });
+  });
 });

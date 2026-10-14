@@ -2,16 +2,12 @@
 
 Ordered by expected value. Measurements come from `docs/OPENCODE-INTEGRATION.md`.
 
-## 1. Emissão de Tools nativas do OpenCode (Tool Cards / `providerExecuted: true`)
+## 1. Emissão de Tools nativas do OpenCode (Tool Cards / `providerExecuted: true`) — ✅ Implementado
 
-Hoje os passos de ferramentas executados internamente pelo `agy` (`run_command`, `view_file`, etc.)
-são convertidos e emitidos na stream como blocos de `reasoning` (`▸ run_command ...`).
-- **Problema**: O OpenCode não renderiza como os tool cards nativos nem aplica os formatters
-  visuais padrão da UI do OpenCode.
-- **Solução pesquisada**: Como verificado em `docs/PERMISSIONS-AND-EFFORT.md` (F4), o adapter do
-  OpenCode 2.x suporta partes de stream `tool-call` e `tool-result` com a flag `providerExecuted: true`.
-- **Implementação**: No evento `onToolStep`, mapear `run_command` -> tool card `bash` / `run_command`,
-  `view_file` -> tool card de leitura, fechando com `tool-result` quando `state === "DONE"`.
+Os passos de ferramentas executados internamente pelo `agy` (`run_command`, `view_file`, etc.)
+são emitidos na stream como `tool-call` e `tool-result` com `providerExecuted: true` (incluindo
+`tool_info.output`), permitindo que o OpenCode 2.x renderize tool cards nativos (configurável
+via `emitToolCards`, padrão `true`).
 
 ## 2. Diálogo interativo e perguntas do usuário (`ask_question` / `question`)
 
@@ -28,14 +24,12 @@ para forçar perguntas em texto puro).
   3. *Bridge MCP*: Expor um servidor MCP local que sirva como canal de interação bidirecional
      com o OpenCode.
 
-## 3. Seleção de Reasoning Effort via UI do OpenCode (`ctrl+t` / variants)
+## 3. Seleção de Reasoning Effort via UI do OpenCode (`ctrl+t` / variants) — ✅ Implementado
 
-Hoje as variantes de esforço estão fixadas no ID do modelo (`gemini-4-argon-high`, etc.).
-- **Solução pesquisada**: O OpenCode injeta a variante escolhida via `ctrl+t` / `/variants`
-  em `callOpts.providerOptions?.agy?.effort`.
-- **Implementação**: Registrar no catálogo famílias base (ex: `gemini-4-argon`, `claude-sonnet-5-5`)
-  com variantes (`low`, `medium`, `high`), e dinamicamente resolver o ID completo do agy
-  ou passar `--effort <effort>`. Manter retrocompatibilidade com IDs completos.
+Suporte a famílias base no catálogo (`gemini-4-argon`, `gemini-3.8-flash`, `claude-opus-5-5`,
+`claude-sonnet-5-5`, `gpt-oss-120b`) com variantes (`low`, `medium`, `high`) lidas de
+`callOpts.providerOptions?.agy?.effort` (ou `defaultEffort`), mantendo retrocompatibilidade
+com IDs completos (`gemini-4-argon-high`, etc.).
 
 ## 4. MCP Servers e Tools Externas do OpenCode para o agy
 
