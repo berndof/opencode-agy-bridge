@@ -20,9 +20,9 @@ describe("conversation-tracker", () => {
     expect(s.size).toBe(0);
   });
 
-  test("snapshot returns pb file stems", async () => {
-    await writeFile(join(dir, "conv-abc.pb"), "");
-    await writeFile(join(dir, "conv-def.pb"), "");
+  test("snapshot returns db file stems", async () => {
+    await writeFile(join(dir, "conv-abc.db"), "");
+    await writeFile(join(dir, "conv-def.db"), "");
     await writeFile(join(dir, "not-conv.txt"), "");
 
     const s = await snapshot(dir);
@@ -45,7 +45,7 @@ describe("conversation-tracker", () => {
 
   test("findNewConversation returns new conversation id", async () => {
     const before = await snapshot(dir);
-    await writeFile(join(dir, "new-conv.pb"), "");
+    await writeFile(join(dir, "new-conv.db"), "");
 
     const result = await findNewConversation(before, dir);
     expect(result).toBe("new-conv");
@@ -53,18 +53,18 @@ describe("conversation-tracker", () => {
 
   test("findNewConversation returns null when multiple new files", async () => {
     const before = await snapshot(dir);
-    await writeFile(join(dir, "a.pb"), "");
-    await writeFile(join(dir, "b.pb"), "");
+    await writeFile(join(dir, "a.db"), "");
+    await writeFile(join(dir, "b.db"), "");
 
     const result = await findNewConversation(before, dir);
     expect(result).toBeNull();
   });
 
   test("findNewConversation detects single new file among existing ones", async () => {
-    await writeFile(join(dir, "existing.pb"), "old");
+    await writeFile(join(dir, "existing.db"), "old");
 
     const before = await snapshot(dir);
-    await writeFile(join(dir, "new-one.pb"), "new");
+    await writeFile(join(dir, "new-one.db"), "new");
 
     const result = await findNewConversation(before, dir);
     expect(result).toBe("new-one");
