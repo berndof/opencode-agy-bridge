@@ -11,7 +11,8 @@ export async function snapshot(dir: string): Promise<Set<string>> {
     const entries = await readdir(dir);
     const stems = new Set<string>();
     for (const entry of entries) {
-      if (entry.endsWith(".pb")) {
+      // agy CLI creates .db files (SQLite databases) for conversations
+      if (entry.endsWith(".db")) {
         stems.add(entry.slice(0, -3));
       }
     }

@@ -10,13 +10,18 @@ export interface RunAgyInput {
   extraArgs?: string[];
   timeoutMs?: number;
   onTextDelta?: (delta: string) => void;
+  /** Fired as soon as agy reports the conversation id (init event), before the turn completes. */
+  onConversationId?: (id: string) => void;
   abortSignal?: AbortSignal;
 }
 
 export interface AgyUsage {
   inputTokens: number;
+  /** Includes thinkingTokens (agy reports total = input + output). */
   outputTokens: number;
   totalTokens: number;
+  thinkingTokens: number;
+  cacheReadTokens: number;
 }
 
 export interface RunAgyResult {
@@ -41,6 +46,8 @@ interface AgyJsonOutput {
     input_tokens?: number;
     output_tokens?: number;
     total_tokens?: number;
+    thinking_tokens?: number;
+    cache_read_tokens?: number;
   };
 }
 
@@ -57,6 +64,8 @@ function toResult(parsed: AgyJsonOutput): {
         inputTokens: parsed.usage.input_tokens ?? 0,
         outputTokens: parsed.usage.output_tokens ?? 0,
         totalTokens: parsed.usage.total_tokens ?? 0,
+        thinkingTokens: parsed.usage.thinking_tokens ?? 0,
+        cacheReadTokens: parsed.usage.cache_read_tokens ?? 0,
       }
       : null,
   };
@@ -154,16 +163,25 @@ export async function runAgy(input: RunAgyInput): Promise<RunAgyResult> {
     let stdoutBuffer = "";
     let isSettled = false;
 
+    let conversationIdEmitted = false;
+
     function processStreamLine(line: string) {
       if (!line.startsWith("{")) return;
       try {
         const parsed = JSON.parse(line) as {
           event?: string;
+          conversation_id?: string;
           step_update?: {
+            conversation_id?: string;
             step_type?: string;
             text_delta?: string;
           };
         };
+        const convId = parsed.conversation_id ?? parsed.step_update?.conversation_id;
+        if (!conversationIdEmitted && typeof convId === "string" && convId) {
+          conversationIdEmitted = true;
+          input.onConversationId?.(convId);
+        }
         if (
           parsed.event === "step_update" &&
           (parsed.step_update?.step_type === "agent_response" || !parsed.step_update?.step_type) &&
@@ -179,15 +197,13 @@ export async function runAgy(input: RunAgyInput): Promise<RunAgyResult> {
 
     child.stdout.on("data", (chunk: Buffer) => {
       stdoutChunks.push(chunk);
-      if (input.onTextDelta) {
-        stdoutBuffer += decoder.write(chunk);
-        let newlineIdx: number;
-        while ((newlineIdx = stdoutBuffer.indexOf("\n")) !== -1) {
-          const line = stdoutBuffer.slice(0, newlineIdx).trim();
-          stdoutBuffer = stdoutBuffer.slice(newlineIdx + 1);
-          if (line) {
-            processStreamLine(line);
-          }
+      stdoutBuffer += decoder.write(chunk);
+      let newlineIdx: number;
+      while ((newlineIdx = stdoutBuffer.indexOf("\n")) !== -1) {
+        const line = stdoutBuffer.slice(0, newlineIdx).trim();
+        stdoutBuffer = stdoutBuffer.slice(newlineIdx + 1);
+        if (line) {
+          processStreamLine(line);
         }
       }
     });
@@ -227,11 +243,9 @@ export async function runAgy(input: RunAgyInput): Promise<RunAgyResult> {
       if (isSettled) return;
       isSettled = true;
 
-      if (input.onTextDelta) {
-        stdoutBuffer += decoder.end();
-        if (stdoutBuffer.trim()) {
-          processStreamLine(stdoutBuffer.trim());
-        }
+      stdoutBuffer += decoder.end();
+      if (stdoutBuffer.trim()) {
+        processStreamLine(stdoutBuffer.trim());
       }
 
       const stdout = Buffer.concat(stdoutChunks).toString("utf-8");
