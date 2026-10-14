@@ -110,6 +110,13 @@ OpenCode's own log: `~/.local/share/opencode/log/opencode.log`.
 
 ## Known limitations
 
+- **agy tool permissions (headless):** agy runs its own tools, but in headless mode it
+  **auto-denies** any tool that would need an approval prompt and ends the turn with no
+  text. The bridge shows agy's explanation instead of an empty reply, and lists agy's tool
+  steps as reasoning blocks. To let agy use tools, either add allow-rules to
+  `~/.gemini/antigravity-cli/settings.json` (`permissions.allow`, e.g. `"command(git log)"`
+  — shared with every agy session), or pass `"extraArgs": ["--dangerously-skip-permissions"]`
+  in the provider options (auto-approves everything, only for OpenCode-launched agy).
 - **Startup latency:** each turn spawns a fresh `agy` (≈3–5 s before the model starts).
   A persistent per-session process is planned ([roadmap](docs/ROADMAP.md)).
 - **No structured tool calls:** agy uses its own tools inside its process.

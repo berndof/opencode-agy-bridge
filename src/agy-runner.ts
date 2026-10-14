@@ -12,7 +12,16 @@ export interface RunAgyInput {
   onTextDelta?: (delta: string) => void;
   /** Fired as soon as agy reports the conversation id (init event), before the turn completes. */
   onConversationId?: (id: string) => void;
+  /** Fired when agy starts/finishes one of its own tools (run_command, view_file, ...). */
+  onToolStep?: (step: AgyToolStep) => void;
   abortSignal?: AbortSignal;
+}
+
+export interface AgyToolStep {
+  index: number;
+  name: string;
+  state: string;
+  parameters: Record<string, unknown>;
 }
 
 export interface AgyUsage {
@@ -173,8 +182,12 @@ export async function runAgy(input: RunAgyInput): Promise<RunAgyResult> {
           conversation_id?: string;
           step_update?: {
             conversation_id?: string;
+            step_index?: number;
             step_type?: string;
+            state?: string;
             text_delta?: string;
+            tool_name?: string;
+            tool_info?: { name?: string; parameters?: Record<string, unknown> };
           };
         };
         const convId = parsed.conversation_id ?? parsed.step_update?.conversation_id;
@@ -182,13 +195,22 @@ export async function runAgy(input: RunAgyInput): Promise<RunAgyResult> {
           conversationIdEmitted = true;
           input.onConversationId?.(convId);
         }
+        const su = parsed.step_update;
+        if (parsed.event === "step_update" && su?.step_type === "tool") {
+          input.onToolStep?.({
+            index: su.step_index ?? -1,
+            name: su.tool_name ?? su.tool_info?.name ?? "tool",
+            state: su.state ?? "",
+            parameters: su.tool_info?.parameters ?? {},
+          });
+        }
         if (
           parsed.event === "step_update" &&
-          (parsed.step_update?.step_type === "agent_response" || !parsed.step_update?.step_type) &&
-          typeof parsed.step_update?.text_delta === "string" &&
-          parsed.step_update.text_delta.length > 0
+          (su?.step_type === "agent_response" || !su?.step_type) &&
+          typeof su?.text_delta === "string" &&
+          su.text_delta.length > 0
         ) {
-          input.onTextDelta?.(parsed.step_update.text_delta);
+          input.onTextDelta?.(su.text_delta);
         }
       } catch {
         // Line might be incomplete or non-JSON; full tolerant parsing occurs on close.

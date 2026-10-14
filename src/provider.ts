@@ -12,7 +12,7 @@ import type {
   LanguageModelV3FinishReason,
 } from "@ai-sdk/provider";
 import { runAgy } from "./agy-runner.js";
-import type { AgyUsage } from "./agy-runner.js";
+import type { AgyUsage, AgyToolStep } from "./agy-runner.js";
 import { snapshot, findNewConversation, defaultConversationsDir } from "./conversation-tracker.js";
 import { SessionStore } from "./session-store.js";
 import { flattenPromptDetailed } from "./prompt-mapper.js";
@@ -297,6 +297,34 @@ export function toV3Usage(u: AgyUsage | null): LanguageModelV3Usage {
   };
 }
 
+type StreamHandlers = {
+  onTextDelta?: (delta: string) => void;
+  onToolStep?: (step: AgyToolStep) => void;
+};
+
+/** One-line label for an agy tool step, e.g. `run_command: git status`. */
+export function describeToolStep(step: AgyToolStep): string {
+  const p = step.parameters ?? {};
+  const preferred = ["CommandLine", "AbsolutePath", "TargetFile", "SearchPath", "Query", "query", "Url"];
+  const main =
+    preferred.map((k) => p[k]).find((v) => typeof v === "string") ??
+    Object.values(p).find((v) => typeof v === "string");
+  if (typeof main !== "string" || !main) return step.name;
+  const oneLine = main.replace(/\s+/g, " ").trim();
+  return `${step.name}: ${oneLine.length > 200 ? oneLine.slice(0, 200) + "…" : oneLine}`;
+}
+
+/**
+ * agy reports some empty turns only on stderr — notably tools auto-denied in headless
+ * mode ("a tool required the \"command\" permission …"). Surface that instead of an
+ * empty reply.
+ */
+export function emptyResponseNotice(stderr: string): string {
+  const lines = stderr.split("\n").map((l) => l.trim()).filter(Boolean);
+  const detail = lines.slice(-3).join("\n").slice(0, 800);
+  return `⚠️ agy finished the turn without a response.${detail ? "\n\n" + detail : ""}`;
+}
+
 /**
  * Stable session key when OpenCode does not send x-agy-session-id: hash of the first
  * user message, so follow-up turns of the same OpenCode session resume the same agy
@@ -462,7 +490,7 @@ function buildLanguageModel(
   const runForCall = (
     prep: PreparedAgyCall,
     abortSignal: AbortSignal | undefined,
-    onTextDelta?: (delta: string) => void,
+    handlers: StreamHandlers = {},
   ) => {
     const spec = resolveAgyModelSpec(modelId, opts.defaultModel);
     const extraArgs = [...(opts.extraArgs ?? [])];
@@ -494,15 +522,19 @@ function buildLanguageModel(
           .set(prep.sessionId, id, prep.newMessageCount, prep.entry?.prevOutput ?? "")
           .catch(() => {});
       },
-      onTextDelta: onTextDelta
+      onTextDelta: handlers.onTextDelta
         ? (delta) => {
           if (firstDelta) {
             firstDelta = false;
             dbg("agy:first-delta", { sessionId: prep.sessionId, ms: Date.now() - t0 });
           }
-          onTextDelta(delta);
+          handlers.onTextDelta!(delta);
         }
         : undefined,
+      onToolStep: (step) => {
+        dbg("agy:tool", { sessionId: prep.sessionId, ms: Date.now() - t0, tool: describeToolStep(step), state: step.state });
+        handlers.onToolStep?.(step);
+      },
     }).then((result) => {
       dbg("agy:done", {
         sessionId: prep.sessionId,
@@ -576,7 +608,7 @@ function buildLanguageModel(
     const { conversationId, delta } = await finalizeAgyCall(prep, result);
 
     return {
-      content: [{ type: "text" as const, text: delta }],
+      content: [{ type: "text" as const, text: delta.trim() ? delta : emptyResponseNotice(result.stderr) }],
       finishReason: finishReasonFor(result),
       usage: toV3Usage(result.usage),
       providerMetadata: {
@@ -595,7 +627,6 @@ function buildLanguageModel(
   };
 
   const doStream = async (callOpts: LanguageModelV3CallOptions) => {
-    const textId = "agy-1";
     // Fast now (no global lock) — errors here surface as a normal rejected call.
     const prep = await prepareAgyCall(callOpts);
 
@@ -630,20 +661,61 @@ function buildLanguageModel(
 
         enqueue({ type: "stream-start", warnings: prep.warnings });
 
+        // Text blocks: a new block after each agy tool step, so text and tool activity
+        // render in order.
+        let textSeq = 0;
+        let textId: string | null = null;
+        let streamedText = "";
+        const openText = (): string => {
+          if (!textId) {
+            textId = `agy-text-${++textSeq}`;
+            enqueue({ type: "text-start", id: textId });
+          }
+          return textId;
+        };
+        const closeText = () => {
+          if (textId) {
+            enqueue({ type: "text-end", id: textId });
+            textId = null;
+          }
+        };
+
+        // agy's own tool calls (run_command, view_file, ...) are shown as reasoning blocks.
+        const openTools = new Set<string>();
+        const onToolStep = (step: AgyToolStep) => {
+          if (ac.signal.aborted) return;
+          const rid = `agy-tool-${step.index}`;
+          const active = step.state === "ACTIVE";
+          if (!openTools.has(rid)) {
+            closeText();
+            openTools.add(rid);
+            enqueue({ type: "reasoning-start", id: rid });
+            enqueue({ type: "reasoning-delta", id: rid, delta: `▸ ${describeToolStep(step)}` });
+          }
+          if (!active) {
+            if (step.state && step.state !== "DONE") {
+              enqueue({ type: "reasoning-delta", id: rid, delta: ` (${step.state.toLowerCase()})` });
+            }
+            enqueue({ type: "reasoning-end", id: rid });
+            openTools.delete(rid);
+          }
+        };
+        const closeTools = () => {
+          for (const rid of openTools) enqueue({ type: "reasoning-end", id: rid });
+          openTools.clear();
+        };
+
         // Do NOT await inside start(): run the turn in the background and push parts as
         // they arrive, so the consumer renders deltas live.
         void (async () => {
-          let textStarted = false;
-          let streamedText = "";
           try {
-            const result = await runForCall(prep, ac.signal, (delta) => {
-              if (ac.signal.aborted) return;
-              if (!textStarted) {
-                textStarted = true;
-                enqueue({ type: "text-start", id: textId });
-              }
-              streamedText += delta;
-              enqueue({ type: "text-delta", id: textId, delta });
+            const result = await runForCall(prep, ac.signal, {
+              onTextDelta: (delta) => {
+                if (ac.signal.aborted) return;
+                streamedText += delta;
+                enqueue({ type: "text-delta", id: openText(), delta });
+              },
+              onToolStep,
             });
 
             if (ac.signal.aborted) {
@@ -652,6 +724,7 @@ function buildLanguageModel(
             }
 
             const { delta } = await finalizeAgyCall(prep, result);
+            closeTools();
 
             enqueue({
               type: "response-metadata",
@@ -660,21 +733,19 @@ function buildLanguageModel(
               modelId,
             });
 
-            if (textStarted) {
+            if (streamedText) {
               // If final delta has more than we streamed, emit remainder
               if (delta.length > streamedText.length && delta.startsWith(streamedText)) {
                 const remaining = delta.slice(streamedText.length);
-                if (remaining) {
-                  enqueue({ type: "text-delta", id: textId, delta: remaining });
-                }
+                if (remaining) enqueue({ type: "text-delta", id: openText(), delta: remaining });
               }
-              enqueue({ type: "text-end", id: textId });
-            } else if (delta) {
-              // Fallback: no streaming deltas received, emit full text
-              enqueue({ type: "text-start", id: textId });
-              enqueue({ type: "text-delta", id: textId, delta });
-              enqueue({ type: "text-end", id: textId });
+            } else {
+              // No streamed deltas: emit the full text, or explain why there is none
+              // (e.g. agy auto-denied a tool permission in headless mode).
+              const text = delta.trim() ? delta : emptyResponseNotice(result.stderr);
+              enqueue({ type: "text-delta", id: openText(), delta: text });
             }
+            closeText();
 
             enqueue({
               type: "finish",
@@ -694,6 +765,8 @@ function buildLanguageModel(
               return;
             }
             dbg("agy:error", { sessionId: prep.sessionId, error: String(err) });
+            closeTools();
+            closeText();
             enqueue({ type: "error", error: err });
             close();
           }
